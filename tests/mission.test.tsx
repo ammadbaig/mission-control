@@ -33,7 +33,7 @@ const DIR = 'C:\\Users\\someone'
  * A host that isn't Windows takes `C:/...` for a relative path and puts its working folder in
  * front, so files are kept from `C:/` on.
  */
-function engine(on: On, options: { eventsUnreadable?: boolean; appData?: boolean; transcriptAge?: { ms: number } } = {}): { files: Map<string, string>; clock: MockClock } {
+function engine(on: On, options: { eventsUnreadable?: boolean; appData?: boolean; transcriptAge?: { ms: number }; unmeasured?: boolean } = {}): { files: Map<string, string>; clock: MockClock } {
   const files = new Map<string, string>()
   const at = (path: string) => path.slice(Math.max(0, path.indexOf('C:/')))
   // Each write moves the file's change time, as a disk does (its length alone may not change).
@@ -75,7 +75,8 @@ function engine(on: On, options: { eventsUnreadable?: boolean; appData?: boolean
     const mtimeMs = at(e.path).includes('/projects/') ? clock.now() - age + (text.length % 1000) : (writes.get(at(e.path)) ?? text.length)
     return { value: { kind: 'file', size: text.length, mtimeMs, isLink: false } }
   })
-  on('state.get', (_, e, next) => (e.key === 'missionCell' ? { value: { value: 20, version: 1 } } : next(e)))
+  // The pane's cell already measured (20px), unless a test measures it itself.
+  if (!options.unmeasured) on('state.get', (_, e, next) => (e.key === 'missionCell' ? { value: { value: 20, version: 1 } } : next(e)))
   on('command.register', () => ({ value: { command: 'mission' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.surfaces', () => ({ value: ['desktop'] }))
@@ -1369,4 +1370,204 @@ test('control characters never reach the files: an escape sequence in a title is
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Fix\u001b[31m the\theader\u009b2J\nnow\u0007' }] } as never)
   expect(JSON.parse(files.get(STATE) ?? 'null').task.title).toBe('Fix[31m the header2J now')
+})
+
+const PANEL = 'C:/Users/someone/.claude/mission-control/.panel.json'
+
+test('the measured cell: an earlier measurement is used at once, with no measuring drawing', async ($, on) => {
+  const { files, clock } = engine(on, { unmeasured: true })
+  files.set(PANEL, JSON.stringify({ cell: 22, measuredAt: 1 }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.findAll({ type: 'Svg' })).map(found => String(found.props.alt))).not.toContain('Loading the team')
+  await ui.unmount()
+})
+
+test('the panel is always drawn: at once with no measurement, and a resize redraws it at the new scale (never blank)', async ($, on) => {
+  const { files, clock } = engine(on, { unmeasured: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1000)
+  const widthOf = async (ui: { findAll: (q: { type: 'Svg' }) => Promise<readonly { props: Record<string, unknown> }[]> }) =>
+    Number((await ui.findAll({ type: 'Svg' })).find(found => String(found.props.alt).startsWith('Agents.'))?.props.width)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 30 } })
+  const alts = (await ui.findAll({ type: 'Svg' })).map(found => String(found.props.alt))
+  expect(alts).not.toContain('Loading the team')
+  // The default cell (26.7): 30 columns x 26.7 x 0.4 = 320.4 of the design's 400.
+  expect(Math.abs((await widthOf(ui)) - 320.4)).toBeLessThan(0.05)
+  // Resized: the very next draw is the panel at the new scale.
+  await ui.redraw({ ...PANE.props, bodyColumns: 20 })
+  expect((await ui.findAll({ type: 'Svg' })).map(found => String(found.props.alt))).not.toContain('Loading the team')
+  expect(Math.abs((await widthOf(ui)) - 213.6)).toBeLessThan(0.05)
+  await ui.unmount()
+  // Nothing measured, nothing stored.
+  await clock.advance(30_000)
+  expect(files.has(PANEL)).toBe(false)
+})
+
+test('/mission measure measures (its drawing only while asked) and keeps the result; /mission size sets it by hand', async ($, on) => {
+  const { files, clock } = engine(on, { unmeasured: true })
+  on('ui.scroll', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // A scroll that is not a measurement changes nothing.
+  await $.ui.scroll({ in: PANE.requestId, requestId: PANE.requestId, contentRows: 200, to: 'end' } as never)
+  expect(files.has(PANEL)).toBe(false)
+  await $.command.run({ command: 'mission', args: 'measure', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+  // The measuring drawing (4000px) took 200 rows: a 20px line.
+  await $.ui.scroll({ in: PANE.requestId, requestId: PANE.requestId, contentRows: 200, to: 'end' } as never)
+  await clock.advance(10)
+  expect(JSON.parse(files.get(PANEL) ?? '{}')).toMatchObject({ cell: 19.99, source: 'measured' })
+  await $.command.run({ command: 'mission', args: 'size 27', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+  expect(JSON.parse(files.get(PANEL) ?? '{}')).toMatchObject({ cell: 27, source: 'size' })
+  await $.command.run({ command: 'mission', args: 'size auto', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+  expect(JSON.parse(files.get(PANEL) ?? '{}')).toEqual({})
+})
+
+test('/mission debug on writes the pane numbers on every change of columns or rows', async ($, on) => {
+  const { files, clock } = engine(on, { unmeasured: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'mission', args: 'debug on', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+  await clock.advance(1000)
+  const debugOf = () => JSON.parse(files.get('C:/Users/someone/.claude/mission-control/.panel-debug.json') ?? '{}').panel
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 43, scroll: { offset: 0, bodyRows: 39 } } })
+  await clock.advance(10)
+  expect(debugOf()).toMatchObject({ bodyColumns: 43, bodyRows: 39, columnPx: 10.68, rowPx: 20.3, rowSource: 'default', scale: 1, budget: 779 })
+  // Only the rows change: written again.
+  await ui.redraw({ ...PANE.props, bodyColumns: 43, scroll: { offset: 0, bodyRows: 30 } })
+  await clock.advance(10)
+  expect(debugOf()).toMatchObject({ bodyRows: 30, budget: 597 })
+  await ui.unmount()
+})
+
+test('the Overview fits the pane: at 30, 39 and 50 rows its height is at most rows x 20.3px, with all four agent cards', async ($, on) => {
+  const { clock } = engine(on, { unmeasured: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Fit the pane' }, { do: 'plan.set', steps: ['Find', 'Fix', 'Verify'] }, { do: 'agent', name: 'Tester', status: 'working', task: 'Checking' }] } as never)
+  await clock.advance(1000)
+  for (const bodyRows of [30, 39, 50]) {
+    const props = { ...PANE.props, bodyColumns: 43, scroll: { offset: 0, bodyRows } }
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props })
+    // The drawings a change replaced lie over the new ones for 400ms (swap.ts): let them lift first.
+    await clock.advance(1000)
+    await ui.redraw(props)
+    const svgs = await ui.findAll({ type: 'Svg' })
+    // The column's height: every drawing in it, the update row once (its three pieces sit side by side).
+    const height = svgs
+      .filter(found => !['Open the activity', 'End of the latest update'].includes(String(found.props.alt)))
+      .reduce((sum, found) => sum + Number(found.props.height), 0)
+    expect(height).toBeLessThan(bodyRows * 20.3 + 0.5)
+    const agents = svgs.find(found => String(found.props.alt).startsWith('Agents.'))
+    for (const name of ['Explorer', 'Worker', 'Tester', 'Security']) expect(String(agents?.props.alt)).toContain(`${name}:`)
+    await ui.unmount()
+  }
+})
+
+test('a slash command typed in a helper session is not a running turn, and revives no old brief', async ($, on) => {
+  const { files, clock, path } = await withHelper($, on, 'Security')
+  // A brief from an earlier task, then a new task in which Security has no part yet.
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Earlier' }, { do: 'event', type: 'dispatch', from: 'orchestrator', to: 'security', text: 'Security: final scan before publishing' }] } as never)
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.done' }, { do: 'task.start', title: 'Now' }] } as never)
+  const t = clock.now()
+  // The exact tail: its last turn ended; then the person typed /mission there.
+  files.set(
+    path,
+    said('user', t - 60_000, 'Security: final scan before publishing') +
+      said('assistant', t - 30_000, [{ type: 'text', text: 'Scan done.' }], 'end_turn') +
+      `${JSON.stringify({ type: 'queue-operation', timestamp: new Date(t).toISOString() })}\n` +
+      `${JSON.stringify({ type: 'user', timestamp: new Date(t + 40).toISOString(), message: { role: 'user', content: '<command-name>/mission</command-name>\n<command-message>mission</command-message>\n<command-args></command-args>' } })}\n` +
+      `${JSON.stringify({ type: 'system', subtype: 'local_command', timestamp: new Date(t + 40).toISOString(), content: '<local-command-stdout>Mission Control opened.</local-command-stdout>' })}\n`,
+  )
+  await clock.advance(5000)
+  // Never shown working (before the fix: working, "Other task: Security: final scan before publishing").
+  expect(agentOf(files, 'Security')?.status ?? 'idle').toBe('idle')
+  expect(agentOf(files, 'Security')?.currentTask ?? '').not.toContain('Other task')
+  expect(turnOf(files.get(path) ?? '').state).toBe('ended')
+})
+
+const ROLES = 'C:/Users/someone/.claude/mission-control/.roles.json'
+/** A helper session that has had no brief: only the state, as it finds it. */
+async function quietHelper($: Engine, on: On, call: () => Promise<{ result: string }> = async () => ({ result: 'ok' })) {
+  const made = engine(on)
+  on('tool.call', call)
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.PermissionRequest', () => ({}))
+  on('classic.PostToolUse', () => ({}))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  made.files.set(STATE, JSON.stringify({ task: { id: 't', title: 'Check', status: 'running', startedAt: 1 }, plan: null, queue: [], agents: [{ id: 'tester', name: 'Tester', status: 'working', currentTask: 'Checking the previews', startedAt: 1 }], orchestrator: { status: 'waiting', waitingOn: [], reviewing: [] }, lastUpdated: made.clock.now() }))
+  return made
+}
+
+test("a helper knows its own role from the orchestrator's record of its session, with no brief", async ($, on) => {
+  const { files, clock } = await quietHelper($, on)
+  // The orchestrator's watcher recorded this session's transcript (session.id) as the Tester's.
+  files.set(ROLES, JSON.stringify({ 'cli-orch': 'Tester' }))
+  await $.classic.PermissionRequest({ tool_name: 'Write', tool_input: { file_path: '/x/notes.md' } } as never)
+  await clock.advance(10)
+  expect(agentOf(files, 'Tester')).toMatchObject({ status: 'needs_user', currentTask: 'Allow or deny: Write notes.md' })
+})
+
+test('a wrapped cross-session brief names the role, and the role is kept for the session', async ($, on) => {
+  const { files, clock } = await quietHelper($, on)
+  const brief = 'Another Claude session sent a message:\n<cross-session-message from="local_00000000-0000-4000-8000-0000000000aa" from-name="Master Orchestrator">\nCheck it. Progress: python3 mc.py say --as tester "..."\n</cross-session-message>'
+  await $.prompt.submit({ text: brief, wait: false, origin: { kind: 'peer' } } as never)
+  await clock.advance(10)
+  expect(JSON.parse(files.get(ROLES) ?? '{}')).toMatchObject({ 'cli-orch': 'Tester' })
+  await $.classic.PermissionRequest({ tool_name: 'WebFetch', tool_input: { url: 'https://example.com/x' } } as never)
+  await clock.advance(10)
+  expect(agentOf(files, 'Tester')).toMatchObject({ status: 'needs_user', currentTask: 'Allow or deny: WebFetch example.com' })
+})
+
+test("a helper's own call still open after 1 second shows NEEDS YOU; the exact prompt replaces it; its return clears it", async ($, on) => {
+  const gate: { release?: () => void } = {}
+  const { files, clock } = await quietHelper($, on, () => new Promise(resolve => (gate.release = () => resolve({ result: 'opened' }))))
+  files.set(ROLES, JSON.stringify({ 'cli-orch': 'Tester' }))
+  const call = $.tool.call({ tool: 'mcp__Claude_Browser__preview_start', url: 'file:///x/page.html' } as never)
+  await clock.advance(500)
+  expect(agentOf(files, 'Tester')?.status).toBe('working')
+  await clock.advance(600)
+  expect(agentOf(files, 'Tester')).toMatchObject({ status: 'needs_user', currentTask: 'May be waiting for you: preview_start' })
+  // The engine reports the prompt: its exact words replace the timed ones.
+  await $.classic.PermissionRequest({ tool_name: 'mcp__Claude_Browser__preview_start', tool_input: { url: 'file:///x/page.html' } } as never)
+  await clock.advance(10)
+  expect(agentOf(files, 'Tester')).toMatchObject({ status: 'needs_user', currentTask: 'Allow or deny: preview_start page.html' })
+  // Answered: the call returns, and the card is back to what it was.
+  gate.release?.()
+  await call
+  await clock.advance(10)
+  expect(agentOf(files, 'Tester')).toMatchObject({ status: 'working', currentTask: 'Checking the previews' })
+})
+
+test("a helper's long shell command is never taken for a prompt", async ($, on) => {
+  const gate: { release?: () => void } = {}
+  const { files, clock } = await quietHelper($, on, () => new Promise(resolve => (gate.release = () => resolve({ result: 'built' }))))
+  files.set(ROLES, JSON.stringify({ 'cli-orch': 'Tester' }))
+  const call = $.tool.call({ tool: 'Bash', command: 'npm run build' } as never)
+  await clock.advance(60_000)
+  expect(agentOf(files, 'Tester')?.status).toBe('working')
+  gate.release?.()
+  await call
+})
+
+test('after /mission, and after each of three resizes, the very next draw is the full panel (never blank, never measuring)', async ($, on) => {
+  const { clock } = engine(on, { unmeasured: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Look at the pane' }, { do: 'agent', name: 'Tester', status: 'working', task: 'Checking' }] } as never)
+  await clock.advance(1000)
+  await $.command.run({ command: 'mission', args: '', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 38 } })
+  const full = async () => {
+    const alts = (await ui.findAll({ type: 'Svg' })).map(found => String(found.props.alt))
+    expect(alts).not.toContain('Loading the team')
+    // The whole panel: its header, the task card and the agents.
+    expect(alts.some(alt => alt.startsWith('Mission Control'))).toBe(true)
+    expect(alts.some(alt => alt.startsWith('Current task: Look at the pane'))).toBe(true)
+    expect(alts.some(alt => alt.startsWith('Agents.'))).toBe(true)
+  }
+  await full()
+  for (const bodyColumns of [52, 30, 44]) {
+    await ui.redraw({ ...PANE.props, bodyColumns })
+    await full()
+  }
+  await ui.unmount()
 })

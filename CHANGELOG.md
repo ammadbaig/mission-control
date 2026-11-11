@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3
+
+1.0.2 was never published; its changes are here too.
+
+- The panel is always drawn: no measuring drawing at start or on a resize, which redraws it at the new size at once (1.0.2 went blank for up to 15 seconds on each resize). Its width comes from the pane's columns (10.68px each) and its height from its rows (20.3px each by default, on the short side so no card falls below the pane); `/mission size <px>` (or `auto`) sets the row height by hand and `/mission measure` measures it, only when asked; either is kept in `.panel.json` for every session. Nothing is measured by itself.
+- `/mission debug on` also writes the pane's numbers (columns and rows, the column and row sizes in use, where the row size came from, the scale and the height budget) to `.panel-debug.json` whenever the columns or rows change.
+- A slash command typed in a helper's session (`/mission`, say) is not a running turn, and no longer brings back an old brief as "Other task: …".
+- A helper knows its own role from the orchestrator's record of its session (`.roles.json`, by session id) when its brief did not name it, and keeps it across a reload.
+- In a helper's own session, a tool call (not a shell command, subagent, skill or wait) still open after 1 second shows NEEDS YOU, "May be waiting for you: <tool>"; a prompt Claude Code reports replaces that with its exact words at once; it clears when the call returns. The orchestrator's 10-second guess stays the fallback for helpers without the plugin.
+
 ## 1.0.1
 
 - 1.0.1: the permission guess shows after 10 seconds (it was 30), so a person watching sees NEEDS YOU while the prompt is still open. A call with no tool name is never guessed at.

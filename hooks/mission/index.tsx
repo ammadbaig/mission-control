@@ -8,7 +8,7 @@ import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, parseState, readNewLine
 import { GHOST_MS, settle, shown as asShown, type Shown } from './swap'
 import { activityLines, overviewLines, type Line, type Tone } from './term'
 import { TOKENS } from './tokens'
-import { autoCommand, loadAuto, markOrchestrating, startWatch, watchCall } from './auto'
+import { autoCommand, loadAuto, markOrchestrating, notePanel, startWatch, watchCall } from './auto'
 import { pathsOf, report, say, serially, whenWritten } from './io'
 import { MAX_UPDATES, stateText, type Report } from './writer'
 
@@ -36,12 +36,19 @@ const asciiSetting = atom({ plugin: 'mission-control', key: 'missionAscii' } as 
 const termSecond = atom({ plugin: 'mission-control', key: 'missionSecond' } as const, 0)
 /** Whether this terminal looks unable to draw the block and arrow glyphs (no UTF-8 locale, a bare console). */
 let plainTerminal = false
-/** If the measuring scroll never answers (the pane closed, say): a cell this tall is assumed. */
-const FALLBACK_CELL = 18
+/**
+ * The pane's width and height in px, from its size in cells. Two numbers, as a cell is not square:
+ * - COLUMN_PX, one column's width, sets the scale: min(1, bodyColumns x COLUMN_PX / 400). Measured on
+ *   the desktop app at its default text size, where the panel then fills the pane's width.
+ * - ROW_PX, one row's height, sets the Overview's height budget (bodyRows x ROW_PX). The desktop's
+ *   row is a little under 21px (a 39-row pane cut its last cards at 21); slightly short is
+ *   chosen over slightly tall, so no card ever falls below the pane. `/mission size <px>` sets it by
+ *   hand and `/mission measure` measures it; either is kept in `.panel.json`.
+ */
+const COLUMN_PX = 10.68
+const ROW_PX = 20.3
 /** Px kept back from the Overview's budget (see the render). */
-const SAFETY = 8
-/** A cell's width as a share of its height, on the low side (see the render's `scale`). */
-const CH_PER_LH = 0.4
+const SAFETY = 12
 /** While this session's task runs, it marks the state as fresh this often (the LIVE pill). */
 const HEARTBEAT_MS = 20_000
 
@@ -178,7 +185,14 @@ export async function startMission($: EngineInterface): Promise<void> {
   // One reader per environment: a second session.start replaces the first's timer.
   reader?.cancel()
   reader = $.clock.every(1000, safeTick)
-  void measureCell($).catch(() => undefined)
+  // The cell measured before (in any session) stands, so the pane is drawn at its size at once.
+  // The cell set or measured before (in any session) stands; else the default. Nothing is measured
+  // by itself: the panel is drawn at once and stays drawn.
+  const stored = await storedCell($).catch(() => null)
+  if (stored) {
+    cellSource = stored.source
+    await update($, cellPx, () => stored.cell)
+  }
 }
 
 /**
@@ -205,14 +219,16 @@ export function endMission($: EngineInterface): void {
 }
 
 /**
- * The pane's cell height: while it is 0 the pane draws one drawing MEASURE_PX tall; a scroll of it
- * raises `ui.scroll`, whose `contentRows` is that height in cells (the hook below turns it into px).
- * Tried every 1.5s until it answers, up to 10 times; then FALLBACK_CELL is assumed.
+ * `/mission measure` only: while `measuringNow`, the pane draws one drawing MEASURE_PX tall; a
+ * scroll of it raises `ui.scroll`, whose `contentRows` is that height in cells (the hook below
+ * turns it into px). Tried every 1.5s, up to 10 times; with no answer, the cell in use stays and
+ * the panel comes back. Never started by itself: not at start, not on a resize.
  */
 async function measureCell($: EngineInterface, tries = 0): Promise<void> {
-  if (await read($, cellPx)) return
+  if (!measuringNow) return
   if (tries >= 10) {
-    await update($, cellPx, cell => cell || FALLBACK_CELL)
+    measuringNow = false
+    await update($, swapTick, n => n + 1)
     return
   }
   await $.ui.scroll({ in: PANE, to: 'end' }).catch(() => undefined)
@@ -233,6 +249,47 @@ function liftGhostsSoon($: EngineInterface): void {
 
 /** The lines a pane body could plausibly be drawn in: a measurement outside this is ignored. */
 const CELL_RANGE = [12, 32]
+const inRange = (cell: number): boolean => cell >= (CELL_RANGE[0] ?? 12) && cell <= (CELL_RANGE[1] ?? 32)
+
+/** `/mission measure` is running: the pane shows the measuring drawing until it answers or gives up. */
+let measuringNow = false
+/** Where the cell in use came from: set with /mission size, measured, or the default. */
+type CellSource = 'size' | 'measured' | 'default'
+let cellSource: CellSource = 'default'
+/** The cell set or measured, kept beside state.json so every session draws at that size at once. */
+const PANEL_FILE = '.panel.json'
+
+/** The cell set or measured before, with where it came from; null when none was (or the file is not one). */
+async function storedCell($: EngineInterface): Promise<{ cell: number; source: CellSource } | null> {
+  const { dir } = await pathsOf($)
+  if (!dir) return null
+  const raw = await $.fs.read(`${dir}/${PANEL_FILE}`).catch(() => '')
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!value || typeof value !== 'object') return null
+  const cell = 'cell' in value ? Number(value.cell) : 0
+  const source = 'source' in value && value.source === 'size' ? 'size' : 'measured'
+  return Number.isFinite(cell) && inRange(cell) ? { cell, source } : null
+}
+
+/** Keeps a cell set or measured (never the default); `null` clears it, back to the default. */
+async function keepCell($: EngineInterface, cell: number | null, source: CellSource): Promise<void> {
+  const { dir } = await pathsOf($)
+  if (!dir) return
+  if (cell === null) {
+    await $.fs.write(`${dir}/${PANEL_FILE}`, '{}\n')
+    return
+  }
+  if (!inRange(cell)) return
+  await $.fs.write(`${dir}/${PANEL_FILE}`, `${JSON.stringify({ cell, source, at: await $.clock.now() })}\n`)
+}
+
+/** The last numbers written to the debug file, so it is written only on a change. */
+let panelNoted = ''
 
 // ---- the writer (io.ts) -------------------------------------------------------------------------
 
@@ -328,11 +385,14 @@ export const registerMission: Register = on => {
   // contentRows = ceil((MEASURE_PX - 1) / cell), so the cell is at least (MEASURE_PX - 1) /
   // contentRows; that lower bound is kept, so the layout is never too tall.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    const cell = await read($, cellPx)
-    if (!cell && e.contentRows > 1) {
+    // Only while /mission measure is drawing the measuring drawing: any other scroll is the person's.
+    if (measuringNow && e.contentRows > 1) {
       const measured = Math.floor(((MEASURE_PX - 1) / e.contentRows) * 100) / 100
-      if (measured >= (CELL_RANGE[0] ?? 12) && measured <= (CELL_RANGE[1] ?? 32)) {
+      if (inRange(measured)) {
+        measuringNow = false
+        cellSource = 'measured'
         await update($, cellPx, () => measured)
+        await keepCell($, measured, 'measured').catch(() => undefined)
         void $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
       }
     }
@@ -354,12 +414,29 @@ export const registerMission: Register = on => {
     if (asked === 'light' || asked === 'dark' || asked === 'auto') {
       await update($, themeSetting, () => asked as MissionTheme)
     }
+    if (words[0]?.toLowerCase() === 'size') {
+      // The row height by hand: `/mission size 20`, or `auto` for the default again.
+      const want = (words[1] ?? '').toLowerCase()
+      const px = Number(want)
+      if (want === 'auto') {
+        cellSource = 'default'
+        await keepCell($, null, 'default').catch(() => undefined)
+        await update($, cellPx, () => 0)
+        return { text: `Mission Control lays the panel out with the default row height (${ROW_PX}px).` }
+      }
+      if (!Number.isFinite(px) || !inRange(px)) return { text: `Use /mission size <px> (the pane's row height, ${CELL_RANGE[0]} to ${CELL_RANGE[1]}), or /mission size auto.` }
+      cellSource = 'size'
+      await keepCell($, px, 'size').catch(() => undefined)
+      await update($, cellPx, () => px)
+      return { text: `Mission Control lays the panel out with a ${px}px row height (a smaller one keeps more of it in the pane), kept for every session.` }
+    }
     await $.ui.open({ id: PANE, title: TITLE })
     // From the top: the terminal follows a tall pane's end otherwise.
     void $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
     if (asked === 'measure') {
-      // Measure the cell again (a font size change): back to the measuring drawing.
-      await update($, cellPx, () => 0)
+      // Asked for: the measuring drawing for a moment, then the panel at the measured size.
+      measuringNow = true
+      await update($, swapTick, n => n + 1)
       void measureCell($).catch(() => undefined)
     }
     return { text: asked ? `Mission Control opened (${asked}).` : 'Mission Control opened.' }
@@ -427,11 +504,19 @@ export const registerMission: Register = on => {
      * letterboxed: in a pane narrower than 400px that left blank bands above and below every
      * drawing (the Activity view's 250px gap) and steps at the card's edges. So in a narrow pane
      * every drawing is scaled down whole, width and height alike, to the column it has: the body's
-     * width is `bodyColumns` cells, a cell is 1ch, and 1ch is taken as 0.40 of the measured line,
-     * on the low side (an ordinary sans at a 1.45 line height is 0.41 to 0.44), so the column is
-     * never wider than the body.
+     * width is `bodyColumns` cells of COLUMN_PX each.
      */
-    const scale = cell ? Math.min(1, (e.props.bodyColumns * cell * CH_PER_LH) / 400) : 1
+    // The width from the columns, the height from the rows (a row set or measured, else ROW_PX): the
+    // panel is always drawn, at once, and a resize only redraws it at the new size.
+    const row = cell || ROW_PX
+    const scale = Math.min(1, (e.props.bodyColumns * COLUMN_PX) / 400)
+    const budget = Math.floor(bodyRows * row) - SAFETY
+    const source: CellSource = cell ? cellSource : 'default'
+    const noted = `${e.props.bodyColumns}|${bodyRows}|${row}|${source}|${scale}`
+    if (noted !== panelNoted) {
+      panelNoted = noted
+      void notePanel($, { bodyColumns: e.props.bodyColumns, bodyRows, columnPx: COLUMN_PX, rowPx: row, rowSource: source, scale: Math.round(scale * 1000) / 1000, budget }).catch(() => undefined)
+    }
     // An `alt` must never be empty, or the app drops the drawing.
     const svgOf = (picture: Shown) => (
       <Svg isInteractive source={picture.svg} alt={picture.alt} width={picture.width * scale} height={picture.height * scale} />
@@ -517,8 +602,8 @@ export const registerMission: Register = on => {
     /** Height the drawings don't use: kept at the bottom, under the cards, never between sections. */
     const give = () => <Box flexGrow={1} />
 
-    // Measuring (the first draw of a session): one drawing of known height.
-    if (!cell) {
+    // Measuring, only while /mission measure runs: one drawing of known height.
+    if (measuringNow) {
       return column([draw(measuring(now, theme))], 'atLeast')
     }
 
@@ -558,8 +643,7 @@ export const registerMission: Register = on => {
 
     // The Overview fills the body: its px height is bodyRows cells, laid out in the drawings' own
     // units (divided by the scale, as they are drawn multiplied by it); the row is one cell tall.
-    const budget = Math.floor(bodyRows * cell) - SAFETY
-    const parts = overview(data, now, theme, { height: budget / scale, rowPx: Math.ceil(cell) / scale })
+    const parts = overview(data, now, theme, { height: budget / scale, rowPx: Math.ceil(row) / scale })
     const card = parts.card
     const open = () => void update($, view, () => 'activity' as MissionView)
     const items: RenderElement[] = [draw(parts.header)]

@@ -104,10 +104,18 @@ function entriesOf(tail: string): Entry[] {
     } catch {
       continue
     }
-    if ((entry.type === 'user' || entry.type === 'assistant') && entry.isSidechain !== true && entry.isMeta !== true) entries.push(entry)
+    if ((entry.type === 'user' || entry.type === 'assistant') && entry.isSidechain !== true && entry.isMeta !== true && !isLocalCommand(entry)) entries.push(entry)
   }
   return entries
 }
+
+/**
+ * A slash command the person ran in that session (`/mission`, say) and its output: written as user
+ * entries the model never answers. Not a turn, so they are passed over: the session stands as its
+ * last real turn left it (ended, usually), and no old brief comes back to life.
+ */
+const LOCAL = /^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat)>/
+const isLocalCommand = (entry: Entry): boolean => entry.type === 'user' && LOCAL.test(textOf(entry))
 
 export function turnOf(tail: string): Turn {
   const entries = entriesOf(tail)

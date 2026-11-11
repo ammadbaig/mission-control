@@ -145,6 +145,19 @@ async function trace($: EngineInterface, entry: Record<string, unknown>): Promis
   if (!debug) return
   traces.push({ time: await $.clock.now(), ...entry })
   traces.splice(0, Math.max(0, traces.length - 30))
+  await writeDebug($)
+}
+
+/** The pane's last numbers: its columns and rows, the cell in use, where it came from, the scale. */
+let panel: Record<string, unknown> | null = null
+
+/** With debug on: the pane's numbers into the debug file, on every change (the pane calls this). */
+export async function notePanel($: EngineInterface, numbers: Record<string, unknown>): Promise<void> {
+  panel = { time: await $.clock.now(), ...numbers }
+  if (debug) await writeDebug($)
+}
+
+async function writeDebug($: EngineInterface): Promise<void> {
   const { dir } = await pathsOf($)
   if (!dir) return
   const file = {
@@ -156,6 +169,7 @@ async function trace($: EngineInterface, entry: Record<string, unknown>): Promis
     helperRole,
     watching: watchOn,
     following: Object.fromEntries([...followed].map(([role, f]) => [role, { path: f.path.split('/').slice(-2).join('/'), turn: f.turn?.state ?? null }])),
+    panel,
     traces,
   }
   await $.fs.write(`${dir}/.panel-debug.json`, `${JSON.stringify(file, null, 1)}\n`)
@@ -300,12 +314,13 @@ export function questionOf(tool: string, input: unknown): string {
   return clip(`Allow or deny: ${name}${target ? ` ${clip(target, 60)}` : ''}`, 80)
 }
 
-let waitingFor: { question: string; task: string; status: string } | null = null
+let waitingFor: { role: string; question: string; task: string; status: string } | null = null
 
 async function ownNeedsUser($: EngineInterface, role: string, question: string): Promise<void> {
   await report($, (state: McState): Report[] => {
     const agent = state.agents.find(each => each.name.toLowerCase() === role.toLowerCase())
-    waitingFor = { question, task: agent?.currentTask ?? '', status: agent?.status ?? 'working' }
+    // Already waiting (the timed guess): the exact words replace it, and what to go back to stays.
+    waitingFor = waitingFor && waitingFor.role === role ? { ...waitingFor, question } : { role, question, task: agent?.currentTask ?? '', status: agent?.status ?? 'working' }
     if (agent?.status === 'needs_user' && agent.currentTask === question) return []
     return [
       { do: 'agent', name: role, status: 'needs_user', task: question },
@@ -316,7 +331,74 @@ async function ownNeedsUser($: EngineInterface, role: string, question: string):
 
 /** In a helper's session, a prompt it waited on has been answered: its card back to what it was. */
 function settleOwn($: EngineInterface): void {
-  if (helperRole && waitingFor) void ownAnswered($, helperRole).catch(() => undefined)
+  if (waitingFor) void ownAnswered($, waitingFor.role).catch(() => undefined)
+}
+
+/**
+ * This session's own role, when it is a helper: the role its brief named (`--as tester`), else the
+ * one the orchestrator's watcher recorded for this session's transcript (ROLES_FILE), else none. An
+ * orchestrating session has none. Kept once found, and recorded, so a reload does not lose it.
+ */
+async function ownRole($: EngineInterface): Promise<string | null> {
+  if (orchestrating || briefed) return null
+  if (helperRole) return helperRole
+  const id = await $.session.id().catch(() => '')
+  const role = id ? (await readRoles($))[id] : undefined
+  if (role) helperRole = role
+  return role ?? null
+}
+
+/** Helper sessions' roles by transcript id, beside state.json: written by the orchestrator's watcher and by a helper from its brief. */
+const ROLES_FILE = '.roles.json'
+async function readRoles($: EngineInterface): Promise<Record<string, string>> {
+  const { dir } = await pathsOf($)
+  if (!dir) return {}
+  try {
+    const value: unknown = JSON.parse(await $.fs.read(`${dir}/${ROLES_FILE}`))
+    if (!value || typeof value !== 'object') return {}
+    return Object.fromEntries(Object.entries(value).filter((pair): pair is [string, string] => typeof pair[1] === 'string' && /^[\w-]+$/.test(pair[0])))
+  } catch {
+    return {}
+  }
+}
+async function recordRoles($: EngineInterface, roles: Record<string, string>): Promise<void> {
+  const { dir } = await pathsOf($)
+  if (!dir) return
+  const known = await readRoles($)
+  const merged = { ...known, ...roles }
+  if (Object.entries(roles).every(([id, role]) => known[id] === role)) return
+  // The newest 50 sessions are plenty: older ones are long finished.
+  await $.fs.write(`${dir}/${ROLES_FILE}`, `${JSON.stringify(Object.fromEntries(Object.entries(merged).slice(-50)))}\n`)
+}
+
+/** How long a helper's own tool call may run before its card says it may be waiting on the person. */
+export const PROMPT_WAIT_MS = 1000
+let callSeq = 0
+
+/**
+ * A helper's own tool call (not a brief): when it is not a long-running kind and has not returned
+ * after PROMPT_WAIT_MS, its card shows "May be waiting for you: <tool>" (the name only); a
+ * permission prompt the engine reports replaces that with its exact words at once. Cleared when the
+ * call returns (or fails, or is denied), by the next call, and when the turn ends.
+ */
+async function watchOwnCall<R>($: EngineInterface, tool: string, run: () => Promise<R>): Promise<R> {
+  // A new call: whatever waited before is over.
+  if (waitingFor) settleOwn($)
+  const role = await ownRole($).catch(() => null)
+  if (!role || runsLong(tool)) return run()
+  const seq = ++callSeq
+  const timer = $.clock.after(PROMPT_WAIT_MS, () => {
+    if (callSeq === seq && !waitingFor) void ownNeedsUser($, role, clip(`May be waiting for you: ${tool.replace(/^mcp__.+?__/, '')}`, 80)).catch(() => undefined)
+  })
+  try {
+    return await run()
+  } finally {
+    timer.cancel()
+    if (callSeq === seq) {
+      callSeq += 1
+      settleOwn($)
+    }
+  }
 }
 
 async function ownAnswered($: EngineInterface, role: string): Promise<void> {
@@ -349,6 +431,7 @@ const APP_ORIGINS = new Set([
   'receive:coordinator',
   'receive:task-notification',
   'receive:peer-send-message',
+  'submit:peer-send-message',
 ])
 
 async function incoming($: EngineInterface, kind: string, text: string): Promise<void> {
@@ -358,7 +441,12 @@ async function incoming($: EngineInterface, kind: string, text: string): Promise
   await keepTitles($).catch(() => undefined)
   if (!briefed && !helperRole) {
     const own = roleInBrief(text)
-    if (own) helperRole = own
+    if (own) {
+      helperRole = own
+      // Kept for this session's transcript, so a reload (or a later load of the plugin) still knows it.
+      const id = await $.session.id().catch(() => '')
+      if (id) void recordRoles($, { [id]: own }).catch(() => undefined)
+    }
   }
   const note = noteOf(text)
   if (note) void trace($, { note: kind, id: note.id, title: note.title, how: note.how, role: roleFor(note.id), automatic: enabled }).catch(() => undefined)
@@ -378,13 +466,7 @@ async function incoming($: EngineInterface, kind: string, text: string): Promise
  */
 export async function watchCall<E extends { tool: unknown }, R>($: EngineInterface, e: E, next: (e: E) => Promise<R>): Promise<R> {
   const tool = String(e.tool)
-  if (!BRIEF_TOOLS.has(tool)) {
-    if (!helperRole || !waitingFor) return next(e)
-    // A helper's call that waited on the person has been answered (allowed or denied).
-    const done = await next(e)
-    void ownAnswered($, helperRole).catch(() => undefined)
-    return done
-  }
+  if (!BRIEF_TOOLS.has(tool)) return watchOwnCall($, tool, () => next(e))
   const input = e as unknown as Record<string, unknown>
   const brief = briefOf(tool, input)
   const at = await $.clock.now()
@@ -437,7 +519,8 @@ export function registerAuto(on: On): void {
 
   // A helper's own permission prompt: its agent NEEDS YOU with the question, until it is answered.
   on('classic.PermissionRequest', async ($, e, next) => {
-    if (helperRole) void ownNeedsUser($, helperRole, questionOf(e.tool_name, e.tool_input)).catch(() => undefined)
+    const role = await ownRole($).catch(() => null)
+    if (role) void ownNeedsUser($, role, questionOf(e.tool_name, e.tool_input)).catch(() => undefined)
     return next(e)
   }).catch((_$, e, next) => next(e))
   // Answered: the call ran (its result, or its failure) or was denied. The turn's end clears it too
@@ -621,6 +704,9 @@ async function watchSessions($: EngineInterface): Promise<void> {
     if (info) infos.push(info)
   }
   await followFrom($, infos)
+  // Each helper's role under its transcript id, so the helper's own plugin knows which card is its own.
+  const roles = Object.fromEntries(infos.flatMap(info => (info.transcriptId && roleFor(info.id) ? [[info.transcriptId, roleFor(info.id) ?? '']] : [])))
+  if (Object.keys(roles).length > 0) await recordRoles($, roles).catch(() => undefined)
   for (const info of infos) {
     const role = roleFor(info.id)
     // A helper whose transcript is followed is handed in from it, not from its record.
