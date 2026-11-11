@@ -32,6 +32,7 @@ export const EVENT_TYPES: EventType[] = [
   'needs_user',
   'plan_changed',
   'user_message',
+  'task_started',
   'task_done',
   'task_failed',
   'progress',
@@ -192,9 +193,14 @@ const restAgents = (state: McState, now: number): void => {
  * task.done), so nothing it set under one task stays in the circle after it. Its turn is kept.
  */
 const restOrchestrator = (state: McState, status: 'idle' | 'done', now: number): void => {
-  const turn = state.orchestrator.turn
-  state.orchestrator = { status, waitingOn: [], reviewing: [], since: now, ...(turn === undefined ? {} : { turn }) }
+  state.orchestrator = { status, waitingOn: [], reviewing: [], since: now, ...turnOfOrch(state.orchestrator) }
 }
+
+/** The orchestrator's running turn, as its own writes keep it. */
+const turnOfOrch = (orch: McState['orchestrator']): { turn?: number; turnLog?: string } => ({
+  ...(orch.turn === undefined ? {} : { turn: orch.turn }),
+  ...(orch.turnLog === undefined ? {} : { turnLog: orch.turnLog }),
+})
 
 /** An agent's state now belongs to the current task (or to none, when there is none). */
 const ownTask = (state: McState, agent: McAgent): void => {
@@ -218,7 +224,10 @@ export function apply(current: McState, report: Report, now: number, id: () => s
       state.task = { id: id(), title: clip(report.title, TITLE_MAX), status: 'running', startedAt: now }
       restAgents(state, now)
       restOrchestrator(state, 'idle', now)
-      break
+      state.lastUpdated = now
+      // Logged by itself, so the task's card has a line of its own from the start (automatic: the
+      // orchestrator's own copy, if it logs one, takes its place).
+      return { state, event: { time: now, type: 'task_started', from: 'orchestrator', to: '', text: 'Started', auto: true } }
     }
     case 'task.done':
     case 'task.fail': {
@@ -230,7 +239,15 @@ export function apply(current: McState, report: Report, now: number, id: () => s
       }
       restAgents(state, now)
       restOrchestrator(state, kind === 'task.done' ? 'done' : 'idle', now)
-      break
+      state.lastUpdated = now
+      // The orchestrator's own task_done or task_failed for this task, before or after, replaces it.
+      return {
+        state,
+        event:
+          kind === 'task.done'
+            ? { time: now, type: 'task_done', from: 'orchestrator', to: '', text: 'Finished', auto: true }
+            : { time: now, type: 'task_failed', from: 'orchestrator', to: '', text: 'Failed', auto: true },
+      }
     }
     case 'task.pause': {
       if (state.task?.status !== 'running') return { error: 'only a running task can be paused' }
@@ -332,7 +349,7 @@ export function apply(current: McState, report: Report, now: number, id: () => s
         waitingOn: names(report.waitingOn),
         reviewing: report.status === 'reviewing' ? names(report.reviewing) : [],
         since: now,
-        ...(state.orchestrator.turn === undefined ? {} : { turn: state.orchestrator.turn }),
+        ...turnOfOrch(state.orchestrator),
       }
       break
     }
@@ -406,19 +423,34 @@ export function apply(current: McState, report: Report, now: number, id: () => s
  * The orchestrator's own turn begins (`open`) or ends: written by the plugin in the orchestrator's
  * session only, never through `report`. While it runs the circle shows WORKING (model.ts
  * `orchestratorOf`). A new turn drops a DONE from an earlier one; the end drops PLANNING,
- * DISPATCHING and WORKING, which last only for their turn.
+ * DISPATCHING and WORKING, which last only for their turn. `log`: its session's transcript.
  */
-export function turnState(current: McState, open: boolean, now: number): McState {
+export function turnState(current: McState, open: boolean, now: number, log = ''): McState {
   const state: McState = structuredClone(current)
   const orch = state.orchestrator
   if (open) {
     orch.turn = now
+    if (log) orch.turnLog = log
+    else delete orch.turnLog
     if (orch.status === 'done') Object.assign(orch, { status: 'idle', since: now })
   } else {
-    delete orch.turn
-    if (ORCH_TURN_ONLY.has(orch.status)) Object.assign(orch, { status: 'idle', since: now })
+    Object.assign(state, endedTurn(state, now))
   }
   state.lastUpdated = now
+  return state
+}
+
+/**
+ * The state with the orchestrator's turn ended: no turn, and PLANNING, DISPATCHING or WORKING
+ * dropped (NEEDS YOU and the rest stand). A pane draws this when the turn's transcript shows it
+ * ended, however it ended, with nothing written; `lastUpdated` is left as it was.
+ */
+export function endedTurn(current: McState, now: number): McState {
+  const state: McState = structuredClone(current)
+  const orch = state.orchestrator
+  delete orch.turn
+  delete orch.turnLog
+  if (ORCH_TURN_ONLY.has(orch.status)) Object.assign(orch, { status: 'idle', since: now })
   return state
 }
 

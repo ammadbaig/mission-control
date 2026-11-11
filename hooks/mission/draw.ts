@@ -75,7 +75,8 @@ const STYLE = [
   '.skel{animation-name:skel;animation-duration:1.4s;animation-timing-function:ease-in-out}',
   '@keyframes ripple{from{transform:scale(1);opacity:0.85}to{transform:scale(2.1);opacity:0}}',
   '@keyframes fadeout{from{opacity:0.85}to{opacity:0}}',
-  '.rip{transform-box:fill-box;transform-origin:center;animation:ripple 400ms ease-out both}',
+  // Hidden until it starts (its delay), so a ring set for a shot's arrival never shows at its departure.
+  '.rip{transform-box:fill-box;transform-origin:center;opacity:0;animation:ripple 400ms ease-out forwards}',
   '@media (prefers-reduced-motion: reduce){.m{animation:none!important}.pk{display:none}.rip{animation-name:fadeout}}',
   '.th-light{display:none}',
   '@media (prefers-color-scheme: light){.th-dark{display:none}.th-light{display:inline}}',
@@ -486,9 +487,19 @@ export const taskTop = (data: MissionData, now: number, theme: ThemeMode): Piece
 }
 
 /** The latest update, for the native row: who, what, when. */
+/**
+ * The task card's latest update: the newest event of the current task (by its taskId, side work
+ * left out), else "Orchestrator · Started" at the task's start (a task started by an older writer);
+ * never a line from another task. With no task, the newest event, whatever it is.
+ */
 export const updateRow = (data: MissionData): UpdateRow => {
-  const latest = data.events[data.events.length - 1]
-  return latest ? { name: nameOf(latest), message: latest.text, time: timeOfDay(latest.time) } : null
+  const task = data.state?.task
+  if (!task) {
+    const latest = data.events[data.events.length - 1]
+    return latest ? { name: nameOf(latest), message: latest.text, time: timeOfDay(latest.time) } : null
+  }
+  const own = data.events.findLast(event => event.taskId === task.id && !event.side)
+  return own ? { name: nameOf(own), message: own.text, time: timeOfDay(own.time) } : { name: 'Orchestrator', message: 'Started', time: timeOfDay(task.startedAt) }
 }
 
 /** The longest name the row draws before cutting it. */
@@ -805,62 +816,121 @@ const link = (ctx: Ctx, look: Look, d: string): string => {
   }
 }
 
-/** One-shot packets and pulses for the events this read brought (none under reduced motion). */
+/** A shot's travel time along its line, with an ease-out. */
+export const SHOT_MS = 800
+/** A shot's dot radius (its glow and fading tail around it). */
+export const SHOT_R = 4
+/** The tail: dots that follow the shot this many ms apart, smaller and fainter. */
+const TAIL = [
+  { lag: 45, r: 3, opacity: 0.5 },
+  { lag: 90, r: 2.2, opacity: 0.3 },
+  { lag: 135, r: 1.5, opacity: 0.15 },
+]
+/** A ring's own time (`.rip`). */
+const RING_MS = 400
+/** How long an outgoing shot's own copy of its line stays after it lands: the graph's repaint is there by then. */
+const LINE_HOLD_MS = 700
+
+/**
+ * When the shots `fresh` (read at `freshAt`) run, by the clock: each starts when it was read, after
+ * any earlier one on the same line (never two dots on one line at once; shots on different lines
+ * read together start together). Only the current task's own events, never side work.
+ */
+export const shotPlan = (data: MissionData, taskId: string | undefined): { event: McEvent; start: number }[] => {
+  const free = new Map<string, number>()
+  const lineOf = (event: McEvent) => (event.type === 'report' || event.type === 'needs_user' || event.type === 'progress' ? event.from : event.type === 'agent_done' ? event.from || event.text : event.to).toLowerCase()
+  return data.fresh
+    .map((event, index) => ({ event, read: data.freshAt?.[index] ?? data.readAt }))
+    .filter(({ event }) => !event.side && (taskId === undefined || event.taskId === taskId))
+    .map(({ event, read }) => {
+      const key = lineOf(event)
+      const start = Math.max(read, free.get(key) ?? 0)
+      if (event.type !== 'progress') free.set(key, start + SHOT_MS)
+      return { event, start }
+    })
+}
+
+/**
+ * The shots and pulses for recent events, timed by the clock (each animation's delay is its start
+ * less `now`, so a redrawn overlay carries on where it was). One shot per event along its agent's
+ * line, played once over SHOT_MS: a brief or a send back out from the centre in Working's colour, an
+ * accept out in Done's green, each over its own copy of the line in its new style (so it never
+ * crosses empty space while the graph repaints), the agent's node pulsing on arrival; a report in to
+ * the centre in In review's pink, a question in Needs you's amber, the centre flashing on arrival.
+ * Progress lines only pulse the node. None under reduced motion (`.pk`), nor when the pane is not live.
+ */
 const packets = (
   ctx: Ctx,
-  fresh: McEvent[],
+  data: MissionData,
   slots: Slot[],
   gx: number,
   gy: number,
   graphH: number,
-): { body: string; style: string } => {
+  taskId?: string,
+): { body: string; style: string; end: number } => {
   const SEATS = seatsFor(graphH)
   const ORCH = orchFor(graphH)
-  const { T } = ctx
-  if (!ctx.motion || fresh.length === 0) return { body: '', style: '' }
+  const { T, now } = ctx
+  if (!ctx.motion || data.fresh.length === 0) return { body: '', style: '', end: 0 }
   const seatOf = (name: string): [number, number] | null => {
     const index = slots.findIndex(slot => slot.name.toLowerCase() === name.trim().toLowerCase())
     const seat = index >= 0 ? SEATS[index] : undefined
     return seat ? [seat[0] + gx, seat[1] + gy] : null
   }
   const orch: [number, number] = [ORCH[0] + gx, ORCH[1] + gy]
+  const disc = orchCircleFor(graphH).disc
   let body = ''
   let style = ''
-  let delay = 0
   let count = 0
-  const leg = (from: [number, number], to: [number, number], color: string) => {
+  let end = 0
+  const delayOf = (at: number) => `animation-delay:${Math.round(at - now)}ms`
+  /** One shot from `start` along the line between the centre and `seat`; `look` draws the line it rides (outgoing). */
+  const leg = (seat: [number, number], outward: boolean, color: string, start: number, look?: Look) => {
+    const [from, to] = outward ? [orch, seat] : [seat, orch]
     const name = `${ctx.id}pk${count++}`
-    style += `@keyframes ${name}{0%{transform:translate(0,0);opacity:0}15%{opacity:1}85%{opacity:1}100%{transform:translate(${to[0] - from[0]}px,${to[1] - from[1]}px);opacity:0}}`
-    body += `<circle class="pk" cx="${from[0]}" cy="${from[1]}" r="3" fill="${color}" style="animation:${name} 400ms ease-out ${delay}ms both;filter:drop-shadow(0 0 4px ${color})"/>`
-    delay += 400
+    if (look) {
+      const d = linkPath(seat, orch, 14, disc + 1)
+      const line = look === 'working' ? flowingLink(ctx, `s${count}`, seat, orch, 14, disc + 1) : link(ctx, look, d)
+      const hold = SHOT_MS + LINE_HOLD_MS
+      style += `@keyframes ${name}l{0%,${Math.round((SHOT_MS / hold) * 100)}%{opacity:1}100%{opacity:0}}`
+      body += `<g class="pk" style="animation:${name}l ${hold}ms linear both;${delayOf(start)}">${line}</g>`
+      end = Math.max(end, start + hold)
+    }
+    style += `@keyframes ${name}{0%{transform:translate(0,0);opacity:0}10%{opacity:1}90%{opacity:1}100%{transform:translate(${to[0] - from[0]}px,${to[1] - from[1]}px);opacity:0}}`
+    const dot = (r: number, opacity: number, lag: number) =>
+      `<circle class="pk" cx="${from[0]}" cy="${from[1]}" r="${r}" fill="${color}" fill-opacity="${opacity}" style="animation:${name} ${SHOT_MS}ms ease-out both;${delayOf(start + lag)}${lag === 0 ? `;filter:drop-shadow(0 0 6px ${color})` : ''}"/>`
+    body += [...TAIL].reverse().map(t => dot(t.r, t.opacity, t.lag)).join('') + dot(SHOT_R, 1, 0)
+    end = Math.max(end, start + SHOT_MS + TAIL[TAIL.length - 1]!.lag)
+    return start + SHOT_MS
   }
-  const ring = (at: [number, number], color: string, r: number) => {
-    body += `<circle class="rip" cx="${at[0]}" cy="${at[1]}" r="${r}" stroke="${color}" stroke-width="1.5" style="animation-delay:${delay}ms"/>`
+  const ring = (at: [number, number], color: string, r: number, when: number) => {
+    body += `<circle class="rip" cx="${at[0]}" cy="${at[1]}" r="${r}" stroke="${color}" stroke-width="1.5" style="${delayOf(when)}"/>`
+    end = Math.max(end, when + RING_MS)
   }
-  for (const event of fresh.slice(-4)) {
+  for (const { event, start } of shotPlan(data, taskId)) {
     const from = seatOf(event.from)
     const to = seatOf(event.to)
     if (event.type === 'dispatch' && to) {
-      leg(orch, to, T.orch)
-      ring(to, T.working, 14)
+      ring(to, T.working, 14, leg(to, true, T.working, start, 'working'))
     } else if (event.type === 'report' && from) {
-      leg(from, orch, T.working)
-      ring(orch, T.orch, orchCircleFor(graphH).disc)
+      ring(orch, T.review, disc, leg(from, false, T.review, start))
     } else if (event.type === 'handoff' && from && to) {
-      leg(from, orch, T.working)
-      leg(orch, to, T.orch)
-      ring(to, T.working, 14)
-    } else if (event.type === 'agent_done' && from) {
-      ring(from, T.done, 14)
+      ring(to, T.working, 14, leg(to, true, T.working, leg(from, false, T.working, start), 'working'))
+    } else if (event.type === 'agent_done') {
+      // An accept: from the agent itself, or several in one "Accepted: A, B" from the orchestrator.
+      const names = from ? [event.from] : (/^Accepted: (.+)$/.exec(event.text)?.[1]?.split(',') ?? [])
+      for (const name of names) {
+        const seat = seatOf(name)
+        if (seat) ring(seat, T.done, 14, leg(seat, true, T.done, start, 'done'))
+      }
     } else if (event.type === 'needs_user' && from) {
-      ring(from, T.needs, 14)
+      ring(orch, T.needs, disc, leg(from, false, T.needs, start))
     } else if (event.type === 'progress' && from) {
-      // One soft pulse on the agent's node: no packet, it told no one.
-      ring(from, alpha(T.working, 0.6), 14)
-    } else continue
-    delay += 50
+      // One soft pulse on the agent's node: no shot, it told no one.
+      ring(from, alpha(T.working, 0.6), 14, start)
+    }
   }
-  return { body, style }
+  return { body, style, end }
 }
 
 /** One agent card, 184 wide and `h` tall (the design's 104: 3 lines) at (x, y). */
@@ -880,11 +950,14 @@ export const progressOf = (events: McEvent[], slot: Slot): string => {
   return ''
 }
 
-/** A card's task line: its task, or for an idle one what idle means here. */
-export const messageOf = (slot: Slot, look: Look, hasTask: boolean): string =>
-  look === 'idle' ? (hasTask && !slot.placeholder && slot.currentTask) || (hasTask ? IDLE_LINE.inTask : IDLE_LINE.noTask) : slot.currentTask
+/**
+ * A card's task line: its task, or for an idle one what idle means here: under a finished or failed
+ * task, what it did in it (`result`, MissionData.results), else no part.
+ */
+export const messageOf = (slot: Slot, look: Look, hasTask: boolean, result = ''): string =>
+  look === 'idle' ? result || (hasTask && !slot.placeholder && slot.currentTask) || (hasTask ? IDLE_LINE.inTask : IDLE_LINE.noTask) : slot.currentTask
 
-const card = (ctx: Ctx, slot: Slot, look: Look, x: number, y: number, h: number, hasTask: boolean, progressLine = ''): string => {
+const card = (ctx: Ctx, slot: Slot, look: Look, x: number, y: number, h: number, hasTask: boolean, progressLine = '', result = ''): string => {
   const { T } = ctx
   const w = 184
   const id = `${ctx.id}-c${x}-${y}`
@@ -938,7 +1011,7 @@ const card = (ctx: Ctx, slot: Slot, look: Look, x: number, y: number, h: number,
       row += text(right, baseline(top + 6, 16, 9), word, { size: 9, fill: color, face: 'mono', weight: 500, tracking: 0.72, anchor: 'end' })
     }
   }
-  const message = messageOf(slot, look, hasTask)
+  const message = messageOf(slot, look, hasTask, result)
   // As many 16px lines as the card's height leaves under its top row (3 at the design's 104), at
   // most 3 in all: the task text first; a working agent's own newest line under it, quieter.
   const lines = Math.max(1, Math.min(3, Math.floor((h - 56) / 16)))
@@ -1124,7 +1197,7 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
     const cards = slots
       .map((slot, index) => {
         const top = H + G + 8 + (index < 2 ? 0 : size.card + 8)
-        return card(ctx, slot, looks[index] ?? 'idle', index % 2 === 0 ? 12 : 204, top, size.card, Boolean(state?.task), progressOf(data.events, slot))
+        return card(ctx, slot, looks[index] ?? 'idle', index % 2 === 0 ? 12 : 204, top, size.card, Boolean(state?.task), progressOf(data.events, slot), data.results?.[slot.name.toLowerCase()])
       })
       .join('')
     return { body: greyed(ctx, head + graph + cards), style: clockStyle([18]) }
@@ -1133,15 +1206,13 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
   return { key: 'agents', svg, height, width: W, alt: `Agents. ${alt}` }
 }
 
-/** How long after a read its events' packets are drawn. */
-const PACKETS_MS = 2500
-
 /**
- * The packets and pulses for the events the last read brought, as a transparent drawing the size of
- * the agents area, laid over it; null when there are none to show. It plays once when it appears.
+ * The shots and pulses for recent events, as a transparent drawing the size of the agents area, laid
+ * over it; null when there are none still to play. Timed by the clock, so drawing it again while it
+ * plays carries every shot on where it was (the pane keeps its source while only the delays differ).
  */
 export const agentsPackets = (data: MissionData, now: number, theme: ThemeMode, size: AgentsSize = DESIGN_AGENTS): Piece | null => {
-  if (data.fresh.length === 0 || now - data.readAt >= PACKETS_MS) return null
+  if (data.fresh.length === 0) return null
   const state = data.state
   const slots = slotsOf(state?.agents ?? [])
   const G = size.graph
@@ -1151,8 +1222,8 @@ export const agentsPackets = (data: MissionData, now: number, theme: ThemeMode, 
   const svg = doc(theme, W, height, T => {
     const ctx = ctxFor(data, now, 'pk', T)
     const [gx, gy] = [12, H]
-    const shot = packets(ctx, data.fresh, slots, gx, gy, G)
-    shown ||= shot.body !== ''
+    const shot = packets(ctx, data, slots, gx, gy, G, state?.task?.id)
+    shown ||= shot.body !== '' && shot.end > now
     return {
       body: `<defs><clipPath id="${ctx.id}-graph"><rect x="${gx}" y="${gy}" width="376" height="${G}" rx="14"/></clipPath></defs><g clip-path="url(#${ctx.id}-graph)">${shot.body}</g>`,
       style: shot.style,

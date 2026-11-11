@@ -29,26 +29,36 @@ const ghosts = new Map<string, Shown & { until: number }>()
 
 /**
  * The drawing to show for `piece` (keyed by `key`) at `now`: its earlier source when only its delays
- * differ, else the new one; and the drawing it replaced, while that is under GHOST_MS old.
- * `changed` says a ghost was laid now, so the caller draws once more after GHOST_MS to lift it.
+ * differ, else the new one; and the drawing it replaced, while that is under GHOST_MS old, with when
+ * its time is up (`until`), so the caller draws once more then to lift it.
  */
-export function settle(key: string, piece: Shown, now: number): { current: Shown; ghost: Shown | null; changed: boolean } {
+export function settle(key: string, piece: Shown, now: number): { current: Shown; ghost: (Shown & { until: number }) | null } {
   const sig = signature(piece)
   const previous = last.get(key)
   let current: Shown = piece
-  let changed = false
   if (previous && previous.sig === sig) {
     current = previous
   } else {
-    if (previous) {
-      ghosts.set(key, { svg: previous.svg, alt: previous.alt, width: previous.width, height: previous.height, until: now + GHOST_MS })
-      changed = true
-    }
+    if (previous) ghosts.set(key, { svg: previous.svg, alt: previous.alt, width: previous.width, height: previous.height, until: now + GHOST_MS })
     last.set(key, { ...piece, sig })
   }
   const ghost = ghosts.get(key)
   if (ghost && ghost.until <= now) ghosts.delete(key)
-  return { current, ghost: ghost && ghost.until > now ? ghost : null, changed }
+  return { current, ghost: ghost && ghost.until > now ? ghost : null }
+}
+
+const steadyLast = new Map<string, Shown & { sig: string }>()
+/**
+ * A drawing that plays by the clock and lies over another (the shots): its earlier source while only
+ * its delays differ, so its frame is kept and every animation carries on; a changed one replaces it
+ * at once (no hidden load beside it: what it shows is timed by the clock, not by when it loads).
+ */
+export function steady(key: string, piece: Shown): Shown {
+  const sig = signature(piece)
+  const previous = steadyLast.get(key)
+  if (previous && previous.sig === sig) return previous
+  steadyLast.set(key, { ...piece, sig })
+  return piece
 }
 
 /** A Piece as `settle` takes it. */

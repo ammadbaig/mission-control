@@ -3,14 +3,16 @@ import type { EngineInterface, Register, RenderElement, Timer } from 'claude-cod
 
 import type { MissionTheme, MissionView } from '../../types'
 import { SECTION, SECTION_ID, TOOL_DESCRIPTION, TOOL_FULL_NAME, TOOL_NAME, TOOL_SCHEMA } from './contract'
-import { activity, BACK_SQUARE, backPiece, MEASURE_PX, measuring, overview, pill, slice, type Piece } from './draw'
-import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, parseState, readNewLines, type McEvent, type McState, type MissionData } from './model'
-import { GHOST_MS, settle, shown as asShown, type Shown } from './swap'
+import { activity, BACK_SQUARE, backPiece, MEASURE_PX, measuring, modeOf, overview, pill, SHOT_MS, shotPlan, slice, type Piece } from './draw'
+import { addHolds, heldAgents, type Hold } from './hold'
+import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, PART_TYPES, parseState, readNewLines, resultsOf, type McAgent, type McEvent, type McState, type MissionData } from './model'
+import { GHOST_MS, settle, shown as asShown, steady, type Shown } from './swap'
 import { activityLines, overviewLines, type Line, type Tone } from './term'
 import { TOKENS } from './tokens'
-import { autoCommand, loadAuto, markOrchestrating, notePanel, openTurn, startWatch, watchCall } from './auto'
+import { autoCommand, loadAuto, markOrchestrating, notePanel, openTurn, startWatch, TAIL_BYTES, tailOf, watchCall } from './auto'
 import { pathsOf, report, say, serially, whenWritten } from './io'
-import { MAX_UPDATES, stateText, type Report } from './writer'
+import { endedTurn, MAX_UPDATES, stateText, type Report } from './writer'
+import { turnOf } from './transcript'
 
 /**
  * Mission Control: the orchestrator's team as a pane. The data is what the orchestrator reports
@@ -101,11 +103,60 @@ export async function startMission($: EngineInterface): Promise<void> {
   let eventCount = 0
   let offline = true
   let lastClockKey = ''
+  /** Events read since the pane opened, with when: their shots play by these times (the newest few seconds). */
+  let recent: { event: McEvent; at: number }[] = []
+  const SHOTS_KEPT_MS = 8000
+  /**
+   * The landing hold (hold.ts): agents with a shot on its way keep their last drawn look until it
+   * lands. A drawing that changed appears GHOST_MS after it is drawn (swap.ts), so each switch is
+   * drawn GHOST_MS before its landing, and lands with the shot; a timer draws it then.
+   */
+  let holds = new Map<string, Hold>()
+  let lastShown = new Map<string, McAgent>()
+  let holdKey = ''
+  let holdTimer: Timer | null = null
+  /**
+   * Each recent task's own part events (dispatch, report, progress, accept), beyond the KEEP_EVENTS
+   * the list keeps, so a long task's early parts still count when it ends. The newest TASKS_KEPT tasks.
+   */
+  const partsByTask = new Map<string, McEvent[]>()
+  const TASKS_KEPT = 4
+  const PARTS_KEPT = 400
+  const noteParts = (added: McEvent[]) => {
+    for (const event of added) {
+      if (!event.taskId || event.side || !PART_TYPES.has(event.type)) continue
+      const list = partsByTask.get(event.taskId) ?? []
+      list.push(event)
+      partsByTask.delete(event.taskId)
+      partsByTask.set(event.taskId, list.slice(-PARTS_KEPT))
+      for (const old of [...partsByTask.keys()].slice(0, Math.max(0, partsByTask.size - TASKS_KEPT))) partsByTask.delete(old)
+    }
+  }
+  /** The orchestrator's turn transcript as last read: whether it shows that turn ended. */
+  let turnRead: { path: string; turn: number; mtime: number; ended: boolean } | null = null
+  let turnEnded = false
+
+  /**
+   * Whether the orchestrator's stored turn has in fact ended, from its own transcript (transcript.ts,
+   * the rule for helpers): an end written after the turn began (an answer, the person's interrupt).
+   * Read again only when the file changes. False with no turn, or no transcript to read.
+   */
+  const endedFromLog = async (current: McState | null): Promise<boolean> => {
+    const orch = current?.orchestrator
+    if (orch?.turn === undefined || !orch.turnLog) return false
+    const stat = await $.fs.stat(orch.turnLog).catch(() => null)
+    if (!stat) return false
+    if (turnRead && turnRead.path === orch.turnLog && turnRead.turn === orch.turn && turnRead.mtime === stat.mtimeMs) return turnRead.ended
+    const turn = turnOf(await tailOf($, orch.turnLog, TAIL_BYTES).catch(() => ''))
+    const ended = turn.state === 'ended' && turn.endedAt >= orch.turn
+    turnRead = { path: orch.turnLog, turn: orch.turn, mtime: stat.mtimeMs, ended }
+    return ended
+  }
 
   const tick = async () => {
     const now = await $.clock.now()
     let changed = !loaded
-    let fresh: McEvent[] = []
+    let justRead: McEvent[] = []
 
     const nextState = await stampOf($, STATE_FILE)
     if (nextState && (!stateStamp || nextState.size !== stateStamp.size || nextState.mtimeMs !== stateStamp.mtimeMs)) {
@@ -137,15 +188,22 @@ export async function startMission($: EngineInterface): Promise<void> {
         if (restarted) {
           logOffset = 0
           events = []
+          partsByTask.clear()
+          recent = []
           changed = true
         }
         const { events: added, next } = readNewLines(textOfLog, logOffset)
         logOffset = next
         logStamp = nextLog
+        noteParts(added)
         if (added.length > 0) {
           events = [...events, ...added].slice(-KEEP_EVENTS)
           eventCount += added.length
-          fresh = loaded && !restarted ? added : []
+          // Only events new since the pane was first drawn: none replay on opening or after a rewrite.
+          if (loaded && !restarted) {
+            recent.push(...added.map(event => ({ event, at: now })))
+            justRead = added
+          }
           changed = true
         }
       } catch {
@@ -153,8 +211,15 @@ export async function startMission($: EngineInterface): Promise<void> {
       }
     }
 
+    // The orchestrator's turn ended however it ended (no hook needed): drawn as ended.
+    const ended = await endedFromLog(state).catch(() => false)
+    if (ended !== turnEnded) {
+      turnEnded = ended
+      changed = true
+    }
+    const shown = ended && state ? endedTurn(state, now) : state
     // Time alone can change the pane: a long review's minutes, the orchestrator's own status lapsing.
-    const clockKey = clockKeyOf(state, now)
+    const clockKey = clockKeyOf(shown, now)
     if (clockKey !== lastClockKey) {
       lastClockKey = clockKey
       changed = true
@@ -168,9 +233,35 @@ export async function startMission($: EngineInterface): Promise<void> {
     }
     // The terminal's timers are text: while a task runs, they move once a second.
     if (onTerminal && state?.task?.status === 'running') await update($, termSecond, () => Math.floor(now / 1000))
+    // A finished or failed task: what each agent did in it, for its idle card.
+    const task = shown?.task
+    const closed = task && (task.status === 'done' || task.status === 'failed')
+    const results = closed ? resultsOf(partsByTask.get(task.id) ?? [], task.id) : undefined
+    recent = recent.filter(item => now - item.at < SHOTS_KEPT_MS)
+    const fresh = recent.map(item => item.event)
+    const freshAt = recent.map(item => item.at)
+    const real: MissionData = { loaded: true, state: shown, events, eventCount, fresh, freshAt, readAt: now, offline, aliveAt, ...(results ? { results } : {}) }
+    // New shots (only where they play: a live pane) hold their agents' looks until they land.
+    if (justRead.length > 0 && modeOf(real, now) === 'live') {
+      const landed = shotPlan(real, shown?.task?.id)
+        .filter(item => justRead.includes(item.event))
+        .map(item => ({ event: item.event, at: item.start + SHOT_MS }))
+      holds = addHolds(holds, landed, lastShown)
+    }
+    const held = shown ? heldAgents(shown.agents, holds, now, GHOST_MS) : { agents: [], holds: new Map<string, Hold>(), nextAt: null }
+    holds = held.holds
+    const drawnState = shown ? { ...shown, agents: held.agents } : shown
+    lastShown = new Map(held.agents.map(agent => [agent.name.toLowerCase(), agent]))
+    const key = held.agents.map(agent => `${agent.name}:${agent.status}:${agent.startedAt}`).join('|')
+    if (key !== holdKey) {
+      holdKey = key
+      changed = true
+    }
+    holdTimer?.cancel()
+    holdTimer = held.nextAt === null ? null : $.clock.after(Math.max(1, held.nextAt - now), safeTick)
     if (!changed) return
     loaded = true
-    const data: MissionData = { loaded, state, events, eventCount, fresh, readAt: now, offline, aliveAt }
+    const data: MissionData = { ...real, state: drawnState }
     await update($, mission, () => data)
   }
 
@@ -235,16 +326,19 @@ async function measureCell($: EngineInterface, tries = 0): Promise<void> {
   $.clock.after(1500, () => void measureCell($, tries + 1).catch(() => undefined))
 }
 
-/** Bumped GHOST_MS after a drawing changed, so the pane redraws and lifts the drawing it replaced. */
+/** Bumped when a replaced drawing's time is up, so the pane redraws and lifts it. */
 const swapTick = atom({ plugin: 'mission-control', key: 'missionSwap' } as const, 0)
-let lifting = false
-function liftGhostsSoon($: EngineInterface): void {
-  if (lifting) return
-  lifting = true
-  $.clock.after(GHOST_MS + 40, () => {
-    lifting = false
-    void update($, swapTick, n => n + 1).catch(() => undefined)
-  })
+/** The latest lift already set: one at or after a ghost's end lifts it too. */
+let liftAt = 0
+/**
+ * A replaced drawing shown until `until` (swap.ts): a redraw then lifts it. Each ghost on screen
+ * gets its own lift unless one at or after its end is already set; one lift for every ghost would
+ * fire for the first and leave a later one standing until some unrelated draw.
+ */
+function liftGhostAt($: EngineInterface, until: number, now: number): void {
+  if (liftAt >= until && liftAt > now) return
+  liftAt = until
+  $.clock.after(Math.max(1, until - now + 20), () => void update($, swapTick, n => n + 1).catch(() => undefined))
 }
 
 /** The lines a pane body could plausibly be drawn in: a measurement outside this is ignored. */
@@ -431,7 +525,7 @@ export const registerMission: Register = on => {
     const shown = await read($, view)
     const theme = await read($, themeSetting)
     const cell = await read($, cellPx)
-    // Read so a lifted ghost redraws the pane (see liftGhostsSoon).
+    // Read so a lifted ghost redraws the pane (see liftGhostAt).
     await read($, swapTick)
     const now = await $.clock.now()
     const bodyRows = Math.max(1, e.props.scroll.bodyRows)
@@ -511,8 +605,8 @@ export const registerMission: Register = on => {
      * new one's iframe when it is shown.
      */
     const draw = (piece: Piece) => {
-      const { current, ghost, changed } = settle(piece.key, asShown(piece), now)
-      if (changed) liftGhostsSoon($)
+      const { current, ghost } = settle(piece.key, asShown(piece), now)
+      if (ghost) liftGhostAt($, ghost.until, now)
       if (!ghost) {
         return (
           <Box flexDirection="column" overflow="hidden">
@@ -662,7 +756,7 @@ export const registerMission: Register = on => {
               ...(parts.packets
                 ? [
                     <Box position="absolute" top={0} left={0}>
-                      {svgOf(asShown(parts.packets))}
+                      {svgOf(steady('agents-packets', asShown(parts.packets)))}
                     </Box>,
                   ]
                 : []),

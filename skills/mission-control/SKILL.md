@@ -93,7 +93,7 @@ When the person writes while a task runs, decide what it is first.
 
 - The pane seats four agents by default: Explorer, Worker, Tester and Security. Any other name works too and is drawn with a generic bot icon.
 - `agent` with the agent's `name`, its `status` and a `task`: one plain sentence, 80 characters at most, on what it is doing now. Update it whenever that changes.
-  - `idle`: no part in this task right now. Set without `task`, it clears the agent's old words. Every agent is idle when a task starts, and an agent you never mention stays idle. `task` is optional; the card says "No part in this task" (or "Waiting for a task" when none runs).
+  - `idle`: no part in this task right now. Set without `task`, it clears the agent's old words. Every agent is idle when a task starts, and an agent you never mention stays idle. `task` is optional; the card says "No part in this task" (or "Waiting for a task" when none runs). Once a task has finished or failed, the idle card of an agent that took part in it says what it did there, from that task's own log lines: the words it was accepted with, else "Reported: <its report line>", else "Did: <its last brief>"; an agent with no part says "No part in this task". The next task clears it. An agent already accepted for a task that is over never goes back to In review when its session's turn ends late; one never accepted still does.
   - `queued`: has work coming in this task: you plan to dispatch it. Set it only for an agent you will use, and say in `task` what it is waiting for, such as "Waits for the fix to verify it". Never mark an agent queued just because it is free; leave it idle.
   - `working`: at work.
   - `in_review`: it has handed in its report and waits on you. `task` says what it reported, such as "Reported: 6 checks failed".
@@ -131,7 +131,7 @@ Either way, set your own status again (`waiting`, `dispatching`, `planning`).
 
 ## The orchestrator
 
-Whom you wait on is always the agents working, whom you review the agents in review. Your status follows your agents and your own turn, in this order: NEEDS YOU (`needs_user`) when you set it, until an agent's state next changes; REVIEWING while any agent is in review; while your own turn runs, WORKING, or PLANNING or BRIEFING if you set `planning` or `dispatching` in this turn (until an agent's state next changes), or DONE if you finished the task in this turn; WAITING while any agent works; DONE for 30 seconds after `task.done`, then IDLE (the task card still shows the finished task); else IDLE. The plugin knows when your turn starts and ends, so WORKING needs nothing from you, task or no task, and when the turn ends `planning`, `dispatching` and `working` are dropped. `task.start`, `task.done` and `task.fail` start your own status over: IDLE, or DONE after `task.done`. The only statuses you set yourself are `planning`, `dispatching`, `working` and `needs_user` (`orch` with that status). The circle shows each status as one word that always fits inside it: IDLE, PLANNING, BRIEFING (`dispatching`), WORKING, WAITING, REVIEWING, NEEDS YOU (`needs_user`), DONE. `waitingOn` and `reviewing` in an `orch` update (and `--waiting-on`, `--reviewing` on the CLI) are ignored.
+Whom you wait on is always the agents working, whom you review the agents in review. Your status follows your agents and your own turn, in this order: NEEDS YOU (`needs_user`) when you set it, until an agent's state next changes; REVIEWING while any agent is in review; while your own turn runs, WORKING, or PLANNING or BRIEFING if you set `planning` or `dispatching` in this turn (until an agent's state next changes), or DONE if you finished the task in this turn; WAITING while any agent works; DONE for 30 seconds after `task.done`, then IDLE (the task card still shows the finished task); else IDLE. The plugin knows when your turn starts and ends, so WORKING needs nothing from you, task or no task, and when the turn ends `planning`, `dispatching` and `working` are dropped. PLANNING, BRIEFING and WORKING show only while your turn is actually running, however it ends: a normal end, the person stopping it, an error, the app quitting or the plugin loading again; NEEDS YOU stays until you change it. `task.start`, `task.done` and `task.fail` start your own status over: IDLE, or DONE after `task.done`. The only statuses you set yourself are `planning`, `dispatching`, `working` and `needs_user` (`orch` with that status). The circle shows each status as one word that always fits inside it: IDLE, PLANNING, BRIEFING (`dispatching`), WORKING, WAITING, REVIEWING, NEEDS YOU (`needs_user`), DONE. `waitingOn` and `reviewing` in an `orch` update (and `--waiting-on`, `--reviewing` on the CLI) are ignored.
 
 ## Events
 
@@ -146,8 +146,9 @@ Send one event for each of these, with `type`, `from`, `to` and `text`, one plai
 | `needs_user` | an agent or the orchestrator needs the person |
 | `plan_changed` | the plan was set again, and why |
 | `user_message` | the person changed the running task |
-| `task_done` | the task is finished |
-| `task_failed` | the task could not be finished |
+| `task_started` | the task started (logged by `task.start` itself, "Started") |
+| `task_done` | the task is finished (`task.done` logs "Finished" itself; yours, with the detail, replaces it) |
+| `task_failed` | the task could not be finished (`task.fail` logs "Failed" itself; yours replaces it) |
 | `progress` | a helper's own line about its work (added by the helper with `say`) |
 | `task_paused` | the task was paused, and why (logged by `task.pause` itself) |
 | `task_resumed` | the task goes on (logged by `task.resume` itself) |

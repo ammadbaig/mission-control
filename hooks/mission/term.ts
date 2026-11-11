@@ -183,7 +183,7 @@ const agentLines = (data: MissionData, now: number, o: TermOptions, g: Glyphs, t
     const key = `a-${slot.name.toLowerCase()}`
     lines.push(row(key, [seg(`${g.mark[look]} `, tone), seg(name, look === 'idle' || look === 'queued' ? 'dim' : 'strong')], right, o.columns, g.more))
     if (textLines === 0) continue
-    const message = messageOf(slot, look, hasTask) || (hasTask ? IDLE_LINE.inTask : IDLE_LINE.noTask)
+    const message = messageOf(slot, look, hasTask, data.results?.[slot.name.toLowerCase()]) || (hasTask ? IDLE_LINE.inTask : IDLE_LINE.noTask)
     lines.push(...block(`${key}-t`, message, look === 'idle' || look === 'queued' ? 'dim' : 'text', o.columns, textLines, g.more, 2))
     const own = look === 'working' ? progressOf(data.events, slot) : ''
     if (own) lines.push(...block(`${key}-p`, own, 'dim', o.columns, textLines, g.more, 2))

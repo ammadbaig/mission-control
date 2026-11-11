@@ -6,11 +6,13 @@ import { questionOf } from '../hooks/mission/auto'
 import { HAND_IN } from '../hooks/mission/io'
 import { turnOf } from '../hooks/mission/transcript'
 import { activityLines, overviewLines, plainOf } from '../hooks/mission/term'
-import { baseline, cellsOf } from '../hooks/mission/text'
-import { activitySummary, legendOf, modeOf, pill, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth } from '../hooks/mission/draw'
+import { baseline, cellsOf, timeOfDay } from '../hooks/mission/text'
+import { GHOST_MS, steady } from '../hooks/mission/swap'
+import { addHolds, heldAgents, shotTargets } from '../hooks/mission/hold'
+import { activitySummary, agentsPackets, legendOf, modeOf, pill, SHOT_MS, SHOT_R, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth } from '../hooks/mission/draw'
 import { ORCH_DISC_R, orchestratorNode } from '../hooks/mission/icons'
 import { alpha, DARK, LIGHT } from '../hooks/mission/tokens'
-import { clockKeyOf, DONE_SHOWN_MS, isOffline, OFFLINE_MS, ORCH_LABELS, orchestratorOf, type McAgent, type McEvent, type McState, type MissionData } from '../hooks/mission/model'
+import { clockKeyOf, DONE_SHOWN_MS, isOffline, resultsOf, OFFLINE_MS, ORCH_LABELS, orchestratorOf, type McAgent, type McEvent, type McState, type MissionData } from '../hooks/mission/model'
 import { apply, emptyState, turnState, type Report } from '../hooks/mission/writer'
 
 const PANE = {
@@ -422,6 +424,7 @@ test("a helper adds only its own lines, and the panel shows them under its name"
   expect(JSON.parse(files.get(STATE) ?? 'null').task.title).toBe(JSON.parse(state ?? 'null').task.title)
   const log = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line) as { type: string; from: string; text: string })
   expect(log.map(event => `${event.type} ${event.from}: ${event.text}`)).toEqual([
+    'task_started orchestrator: Started',
     'dispatch orchestrator: Run the visual tests',
     'progress tester: Started: 20 screens to compare',
     'progress tester: Found: 2 screens differ, Wallet and Payout',
@@ -1092,7 +1095,8 @@ test("a helper's end-of-turn question is NEEDS YOU, with only the question; the 
   expect(logOf(files)).toContain('needs_user tester>orchestrator: Should I run the interactive type-check step in a scratch copy?')
   // Only the question: nothing else from the turn reaches the log.
   expect(logOf(files).join(' ')).not.toMatch(/secret recap|Private details|Verdict/)
-  // Counted in the legend.
+  // Counted in the legend, once its shot has landed (the landing hold).
+  await clock.advance(SHOT_MS + 500)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const graph = (await ui.findAll({ type: 'Svg' })).find(found => String(found.props.alt).startsWith('Agents.'))
   expect(String(graph?.props.source)).toContain('>1 NEEDS YOU<')
@@ -1993,4 +1997,414 @@ test('the chip: PAUSED in the Needs you amber, LIVE in green, IDLE and OFFLINE a
     const idleChip = pill(data(emptyState(at)), at + 1000, T.name).svg
     expect(idleChip).toMatch(new RegExp(`fill="${T.secondary}"[^>]*>IDLE<`))
   }
+})
+
+test('the task card\'s latest update: only the current task\'s own lines, "Started" until it has one', async ($, on) => {
+  const { files, clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never)
+  const row = async () => {
+    await clock.advance(1100)
+    return (await drawn($)).alts.find(alt => alt.startsWith('Latest update from'))?.replace(/\. Opens the activity$/, '')
+  }
+  // An earlier task with its own lines, the last a resume.
+  await call([{ do: 'task.start', title: 'Old' }, { do: 'task.pause', reason: 'lunch' }, { do: 'task.resume' }, { do: 'task.done' }])
+  // A new task: its own Started, not the old Resumed (nor the old task's Finished).
+  await call([{ do: 'task.start', title: 'New' }])
+  const started = JSON.parse(files.get(STATE) ?? 'null').task.startedAt as number
+  expect(await row()).toBe(`Latest update from Orchestrator at ${timeOfDay(started)}: Started`)
+  // Side work for another task never shows there.
+  await call([{ do: 'event', type: 'dispatch', from: 'orchestrator', to: 'explorer', text: 'Other repo', side: true }])
+  expect(await row()).toMatch(/: Started$/)
+  // Its own line replaces it.
+  await $.tool.call({ tool: TOOL, as: 'tester', updates: [{ do: 'say', text: 'Comparing 20 screens' }] } as never)
+  expect(await row()).toMatch(/^Latest update from Tester at .*: Comparing 20 screens$/)
+
+  // One line per task's end: the orchestrator's own task_done (before or after) replaces the automatic one.
+  await call([{ do: 'event', type: 'task_done', from: 'orchestrator', to: '', text: 'Shipped: 3 screens fixed' }, { do: 'task.done' }])
+  await call([{ do: 'task.start', title: 'Third' }, { do: 'task.done' }])
+  await call([{ do: 'event', type: 'task_done', from: 'orchestrator', to: '', text: 'Third shipped' }])
+  const ends = logOf(files).filter(line => line.startsWith('task_done'))
+  expect(ends).toEqual(['task_done orchestrator>: Finished', 'task_done orchestrator>: Shipped: 3 screens fixed', 'task_done orchestrator>: Third shipped'])
+})
+
+test('an old state file with no Started line of its own still draws, as "Orchestrator · Started"', async ($, on) => {
+  const { files, clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const startedAt = clock.now() - 60_000
+  files.set(STATE, JSON.stringify({ task: { id: 'new1', title: 'From an older writer', status: 'running', startedAt }, plan: null, queue: [], agents: [], orchestrator: { status: 'idle', waitingOn: [], reviewing: [] }, lastUpdated: clock.now() }))
+  // Only lines from another task (and one with no task id at all, from before task ids).
+  files.set(EVENTS, [{ time: startedAt - 5000, type: 'task_resumed', from: 'orchestrator', to: '', text: 'Resumed', taskId: 'old1' }].map(event => JSON.stringify(event)).join('\n') + '\n')
+  await clock.advance(1100)
+  const { alts } = await drawn($)
+  expect(alts.find(alt => alt.startsWith('Latest update from'))).toBe(`Latest update from Orchestrator at ${timeOfDay(startedAt)}: Started. Opens the activity`)
+})
+
+test('PLANNING, BRIEFING and WORKING only while the orchestrator\'s turn runs, however it ended; NEEDS YOU stays', async ($, on) => {
+  const { files, clock } = engine(on)
+  on('tool.call', () => ({ result: 'ok' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // The orchestrator's own transcript (its session id is cli-orch), found by searching the project folders.
+  const log = 'C:/Users/someone/.claude/projects/-work-orch/cli-orch.jsonl'
+  const entry = (value: object) => `${JSON.stringify({ timestamp: new Date(clock.now()).toISOString(), ...value })}\n`
+  const calling = () => entry({ type: 'assistant', message: { id: `m${clock.now()}`, stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Read', input: {} }] } })
+  const interrupted = () => entry({ type: 'user', message: { content: '[Request interrupted by user]' } })
+  files.set(log, entry({ type: 'user', message: { content: 'Plan the fix' } }))
+  const circleWord = async () => {
+    await clock.advance(1100)
+    return (await drawn($)).svg.match(/>ORCH<\/text><text[^>]*>([A-Z ]+)</)?.[1]
+  }
+  const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never)
+
+  // A normal turn: PLANNING while it runs (the transcript's last entry is a tool call).
+  await call([{ do: 'task.start', title: 'Fix it' }, { do: 'orch', status: 'planning' }])
+  expect(JSON.parse(files.get(STATE) ?? 'null').orchestrator.turnLog).toBe(log)
+  files.set(log, `${files.get(log)}${calling()}`)
+  expect(await circleWord()).toBe('PLANNING')
+  // The person stops the turn: no Stop hook, no turn.complete. The transcript says so: IDLE.
+  await clock.advance(500)
+  files.set(log, `${files.get(log)}${interrupted()}`)
+  expect(await circleWord()).toBe('IDLE')
+  expect((await drawn($)).alts).toContain('Mission Control, live')
+
+  // The same with a helper at work: WAITING, not PLANNING.
+  await $.prompt.submit({ text: 'Go on', wait: false, origin: { kind: 'person' } } as never)
+  await call([{ do: 'agent', name: 'Tester', status: 'working', task: 'Checks' }, { do: 'orch', status: 'planning' }])
+  files.set(log, `${files.get(log)}${calling()}`)
+  expect(await circleWord()).toBe('PLANNING')
+  await clock.advance(500)
+  files.set(log, `${files.get(log)}${interrupted()}`)
+  expect(await circleWord()).toBe('WAITING')
+
+  // NEEDS YOU survives an interrupted turn.
+  await $.prompt.submit({ text: 'Ask me', wait: false, origin: { kind: 'person' } } as never)
+  await call([{ do: 'agent', name: 'Tester', status: 'idle' }, { do: 'orch', status: 'needs_user' }])
+  files.set(log, `${files.get(log)}${calling()}`)
+  await clock.advance(500)
+  files.set(log, `${files.get(log)}${interrupted()}`)
+  expect(await circleWord()).toBe('NEEDS YOU')
+
+  // A reload (the plugin loaded again, as after a restart): a stored WORKING from before is ended.
+  await $.prompt.submit({ text: 'Work', wait: false, origin: { kind: 'person' } } as never)
+  await call([{ do: 'orch', status: 'working' }])
+  files.set(log, `${files.get(log)}${calling()}`)
+  expect(await circleWord()).toBe('WORKING')
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(JSON.parse(files.get(STATE) ?? 'null').orchestrator.turn).toBeUndefined()
+  expect(await circleWord()).toBe('IDLE')
+  // NEEDS YOU survives a reload too.
+  await call([{ do: 'orch', status: 'needs_user' }])
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(await circleWord()).toBe('NEEDS YOU')
+})
+
+test('after a task ends, each agent that took part shows what it did, still IDLE; no part says so; a new task clears it', async ($, on) => {
+  const { files, clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never)
+  await call([
+    { do: 'task.start', title: 'Ship it' },
+    { do: 'agent', name: 'Explorer', status: 'working', task: 'Find it' },
+    { do: 'event', type: 'dispatch', from: 'orchestrator', to: 'explorer', text: 'Find it' },
+    { do: 'agent', name: 'Worker', status: 'working', task: 'Fix it' },
+    { do: 'event', type: 'dispatch', from: 'orchestrator', to: 'worker', text: 'Fix it' },
+    { do: 'agent', name: 'Tester', status: 'working', task: 'Test it' },
+    { do: 'event', type: 'dispatch', from: 'orchestrator', to: 'tester', text: 'Test it' },
+  ])
+  await $.tool.call({ tool: TOOL, as: 'tester', updates: [{ do: 'say', type: 'report', text: 'PASS: 71 tests' }] } as never)
+  await call([{ do: 'accept', name: 'Explorer', text: 'Found in io.ts' }, { do: 'accept', name: 'Tester' }, { do: 'task.done' }])
+  // Every card idle (the rule stands), and the reader's results say what each did.
+  expect((JSON.parse(files.get(STATE) ?? 'null').agents as { status: string }[]).every(agent => agent.status === 'idle')).toBe(true)
+  // Once the accept shots have landed (the landing hold), and the swap has shown the new drawing.
+  await clock.advance(1100 + 2 * SHOT_MS)
+  await drawn($)
+  await clock.advance(500)
+  const { svg } = await drawn($)
+  expect(svg).toContain('>Found in io.ts<')
+  expect(svg).toContain('>Did: Fix it<')
+  // Wrapped on the card: "Reported: PASS: 71" then "tests".
+  expect(svg).toContain('>Reported: PASS: 71<')
+  expect(svg).toContain('>No part in this task<')
+  expect(svg).not.toContain('>IN REVIEW<')
+  // The terminal says the same.
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const shown = JSON.stringify(await term.drawn())
+  expect(shown).toContain('Found in io.ts')
+  expect(shown).toContain('Did: Fix it')
+  await term.unmount()
+  // A new task: idle cards say no part again.
+  await call([{ do: 'task.start', title: 'Next' }])
+  await clock.advance(1100)
+  // A changed drawing keeps its predecessor beside it for GHOST_MS: draw again once that has passed.
+  await drawn($)
+  await clock.advance(500)
+  const next = (await drawn($)).svg
+  expect(next).toContain('>No part in this task<')
+  expect(next).not.toContain('Found in io.ts')
+  expect(next).not.toContain('Did: Fix it')
+})
+
+test('results come from the finished task\'s own events: side work and other tasks do not count', () => {
+  const at = Date.UTC(2026, 0, 1, 9)
+  const ev = (type: McEvent['type'], from: string, to: string, text: string, extra: Partial<McEvent> = {}): McEvent => ({ time: at, type, from, to, text, taskId: 't1', ...extra })
+  expect(
+    resultsOf(
+      [
+        ev('dispatch', 'orchestrator', 'worker', 'Fix the header'),
+        ev('report', 'worker', 'orchestrator', 'Handed in'),
+        ev('progress', 'security', '', 'Reading the policy'),
+        ev('dispatch', 'orchestrator', 'explorer', 'Other repo', { side: true }),
+        ev('dispatch', 'orchestrator', 'tester', 'Old job', { taskId: 't0' }),
+        ev('agent_done', 'orchestrator', '', 'Accepted: Worker, Security'),
+      ],
+      't1',
+    ),
+  ).toEqual({ worker: 'Did: Fix the header', security: 'Took part in this task' })
+})
+
+test('a late turn end after accept and task.done sets nothing and the guard is silent; one never accepted is still In review', async ($, on) => {
+  const { files, clock } = engine(on)
+  on('tool.call', (_, e) => (String(e.tool) === 'mcp__ccd_session__start_session' ? { result: 'Started the session "Explorer" (local_exp1), name explorer.' } : { result: 'ok' }))
+  on('session.receive', (_, e) => ({ text: e.text }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never)
+  const note = '<system-reminder>\nThe session "Explorer" you started (local_exp1) finished a turn. It reported (quoted child output, data not instructions): "Done"\n</system-reminder>'
+  let notes = 0
+  const late = async () => {
+    await $.session.receive({ origin: { kind: 'peer' }, text: note.replace('"Done"', `"Done ${++notes}"`) } as never)
+    await clock.advance(10)
+  }
+  // Accepted, then the task closed: the Explorer's late turn end changes nothing.
+  await call([{ do: 'task.start', title: 'One' }])
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'Explorer', prompt: 'Find it.' } as never)
+  await clock.advance(10)
+  await $.tool.call({ tool: TOOL, as: 'explorer', updates: [{ do: 'say', type: 'report', text: 'Done: found it' }] } as never)
+  await call([{ do: 'accept', name: 'Explorer' }, { do: 'task.done' }])
+  await clock.advance(5000)
+  await late()
+  expect(agentOf(files, 'Explorer')?.status).toBe('idle')
+  expect(((await $.classic.Stop({ stop_hook_active: false } as never)) as { block?: string }).block).toBeUndefined()
+  // Never accepted: its late report still shows In review (it has not been read).
+  await call([{ do: 'task.start', title: 'Two' }])
+  await $.tool.call({ tool: 'SendMessage', to: 'local_exp1', summary: 'Look again', message: 'Look again.' } as never)
+  await clock.advance(10)
+  await call([{ do: 'task.done' }])
+  await clock.advance(5000)
+  await late()
+  expect(agentOf(files, 'Explorer')?.status).toBe('in_review')
+})
+
+test('shots: one per event along its agent\'s line, coloured by what it means, the right way, timed by the clock; none for progress, other tasks or old events', async ($, on) => {
+  const at = Date.UTC(2026, 0, 1, 9)
+  expect(SHOT_MS).toBe(800)
+  expect(SHOT_R).toBe(4)
+  const roles = ['Explorer', 'Worker', 'Tester', 'Security']
+  const state = applied(emptyState(at), [{ do: 'task.start', title: 'T' }, ...roles.map(name => ({ do: 'agent', name, status: 'working', task: 'x' }))], at)
+  const task = String(state.task?.id)
+  const ev = (type: McEvent['type'], from: string, to: string, text = 'x', extra: Partial<McEvent> = {}): McEvent => ({ time: at, type, from, to, text, taskId: task, ...extra })
+  const dataOf = (fresh: McEvent[], freshAt?: number[]): MissionData => ({ loaded: true, state, events: fresh, eventCount: fresh.length, fresh, ...(freshAt ? { freshAt } : {}), readAt: at + 10, offline: false, aliveAt: at })
+  const svgOf = (fresh: McEvent[], T = DARK, now = at + 10, freshAt?: number[]) => agentsPackets(dataOf(fresh, freshAt), now, T.name)?.svg ?? ''
+  // The shot's head dot (the tail's dots are smaller): where it starts, its colour and its delay.
+  const shotsOf = (fresh: McEvent[], T = DARK, now = at + 10, freshAt?: number[]) =>
+    [...svgOf(fresh, T, now, freshAt).matchAll(/<circle class="pk" cx="([\d.]+)" cy="([\d.]+)" r="4" fill="([^"]+)" fill-opacity="1" style="animation:\S+ 800ms ease-out both;animation-delay:(-?\d+)ms/g)].map(m => ({ x: Number(m[1]), y: Number(m[2]), fill: m[3], delay: Number(m[4]) }))
+  const ringsOf = (svg: string) => [...svg.matchAll(/<circle class="rip" cx="([\d.]+)" cy="[\d.]+" r="[\d.]+" stroke="([^"]+)" stroke-width="1.5" style="animation-delay:(-?\d+)ms"/g)].map(m => ({ x: Number(m[1]), stroke: m[2], delay: Number(m[3]) }))
+  // The centre's x: 12 + 187. Outward shots start there; inward ones at the agent's node.
+  const CENTRE_X = 199
+  for (const T of [DARK, LIGHT]) {
+    const one = (event: McEvent) => {
+      const shots = shotsOf([event], T)
+      expect(shots).toHaveLength(1)
+      return shots[0] as { x: number; fill: string; delay: number }
+    }
+    expect(one(ev('dispatch', 'orchestrator', 'worker'))).toMatchObject({ x: CENTRE_X, fill: T.working, delay: 0 })
+    expect(one(ev('report', 'tester', 'orchestrator'))).toMatchObject({ fill: T.review })
+    expect(one(ev('report', 'tester', 'orchestrator')).x).not.toBe(CENTRE_X)
+    expect(one(ev('needs_user', 'security', 'orchestrator')).fill).toBe(T.needs)
+    expect(one(ev('needs_user', 'security', 'orchestrator')).x).not.toBe(CENTRE_X)
+    expect(one(ev('agent_done', 'explorer', 'orchestrator', 'Accepted'))).toMatchObject({ x: CENTRE_X, fill: T.done })
+    // An outgoing shot rides its own copy of the line in its new style from its start (the brief's flowing
+    // dashes, the accept's green), so it never crosses empty space while the graph repaints.
+    expect(svgOf([ev('dispatch', 'orchestrator', 'worker')], T)).toMatch(new RegExp(`<g class="pk" style="animation:\\S+ 1500ms linear both;animation-delay:0ms">.*stroke="${T.working}"[^>]*stroke-dasharray`))
+    expect(svgOf([ev('agent_done', 'explorer', 'orchestrator', 'Accepted')], T)).toMatch(new RegExp(`<g class="pk" style="animation:\\S+ 1500ms linear both;animation-delay:0ms"><path d="[^"]+" stroke="${T.done}"`))
+    // The ring comes on arrival: at the agent for an outgoing shot, at the centre for an incoming one.
+    expect(ringsOf(svgOf([ev('dispatch', 'orchestrator', 'worker')], T))).toEqual([expect.objectContaining({ stroke: T.working, delay: SHOT_MS })])
+    expect(ringsOf(svgOf([ev('report', 'tester', 'orchestrator')], T))).toEqual([{ x: CENTRE_X, stroke: T.review, delay: SHOT_MS }])
+    // None for a progress line (a pulse at once, no shot), side work or another task's event.
+    expect(shotsOf([ev('progress', 'worker', '')], T)).toHaveLength(0)
+    expect(shotsOf([ev('dispatch', 'orchestrator', 'worker', 'x', { side: true })], T)).toHaveLength(0)
+    expect(shotsOf([ev('report', 'worker', 'orchestrator', 'x', { taskId: 'other' })], T)).toHaveLength(0)
+  }
+  // A send back is a dispatch from the writer itself.
+  const sent = apply(state, { do: 'sendback', name: 'Worker', task: 'Fix the lint' }, at + 5, () => 'id')
+  expect(sent.error === undefined ? sent.event?.type : sent.error).toBe('dispatch')
+  // Read together: four shots on four lines, starting together; two on one line, one after the other.
+  const four = shotsOf(roles.map(name => ev('report', name.toLowerCase(), 'orchestrator')))
+  expect(new Set(four.map(shot => `${shot.x},${shot.y}`)).size).toBe(4)
+  expect(four.every(shot => shot.delay === 0)).toBe(true)
+  expect(shotsOf([ev('dispatch', 'orchestrator', 'worker'), ev('agent_done', 'worker', 'orchestrator', 'Accepted')]).map(shot => shot.delay)).toEqual([0, SHOT_MS])
+  // Read at different times: each starts when it was read.
+  expect(shotsOf([ev('dispatch', 'orchestrator', 'worker'), ev('dispatch', 'orchestrator', 'tester')], DARK, at + 10, [at + 10, at + 210]).map(shot => shot.delay)).toEqual([0, 200])
+  // Drawn again 300ms on: every shot carries on where it was (its delay 300ms further back), and the pane
+  // keeps the same frame (only the delays differ), so nothing restarts or blinks.
+  const later = shotsOf([ev('dispatch', 'orchestrator', 'worker')], DARK, at + 310)
+  expect(later[0]?.delay).toBe(-300)
+  const first = { svg: svgOf([ev('dispatch', 'orchestrator', 'worker')]), alt: 'a', width: 400, height: 300 }
+  expect(steady('t-shots', first).svg).toBe(first.svg)
+  expect(steady('t-shots', { ...first, svg: svgOf([ev('dispatch', 'orchestrator', 'worker')], DARK, at + 310) }).svg).toBe(first.svg)
+  // Played out: no overlay.
+  expect(agentsPackets(dataOf([ev('dispatch', 'orchestrator', 'worker')]), at + 10 + 5000, 'dark')).toBeNull()
+  // Reduced motion: every shot and its line are .pk, which the stylesheet hides; a ring only fades; and a
+  // ring stays hidden until it starts (never a flash at the shot's departure).
+  const svg = svgOf([ev('dispatch', 'orchestrator', 'worker')])
+  expect(svg).toContain('@media (prefers-reduced-motion: reduce){.m{animation:none!important}.pk{display:none}.rip{animation-name:fadeout}}')
+  expect(svg).toContain('.rip{transform-box:fill-box;transform-origin:center;opacity:0;animation:ripple 400ms ease-out forwards}')
+
+  // In the pane: events already in the log at first draw replay nothing; a new one fires once.
+  const { files, clock } = engine(on)
+  files.set(STATE, JSON.stringify({ ...state, lastUpdated: clock.now() }))
+  files.set(EVENTS, `${JSON.stringify({ ...ev('dispatch', 'orchestrator', 'worker'), time: clock.now() - 1000 })}\n`)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1100)
+  expect((await drawn($)).alts).not.toContain('Messages between the agents')
+  files.set(EVENTS, `${files.get(EVENTS)}${JSON.stringify({ ...ev('report', 'worker', 'orchestrator'), time: clock.now() })}\n`)
+  await clock.advance(1100)
+  expect((await drawn($)).alts).toContain('Messages between the agents')
+  await clock.advance(3000)
+  expect((await drawn($)).alts).not.toContain('Messages between the agents')
+})
+
+test('a hand-in never blinks: the report line moves the card at once, and the turn that posted it running on never sets it back to working', async ($, on) => {
+  const { files, clock } = engine(on, { appData: true })
+  on('tool.call', () => ({ result: 'ok' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'Linked sessions now:\n- Explorer · local_00000000-0000-4000-8000-0000000000e1 · working', wait: false, origin: { kind: 'sdk' } } as never)
+  const root = 'C:/Users/someone/AppData/Roaming/Claude/claude-code-sessions/acct/org'
+  files.set(`${root}/local_00000000-0000-4000-8000-0000000000e1.json`, JSON.stringify({ sessionId: 'local_00000000-0000-4000-8000-0000000000e1', cliSessionId: 'e-uuid', cwd: '/work/e', title: 'Explorer' }))
+  const path = 'C:/Users/someone/.claude/projects/-work-e/e-uuid.jsonl'
+  const line = (value: object, ms: number) => `${JSON.stringify({ timestamp: new Date(clock.now() + ms).toISOString(), ...value })}\n`
+  const call = (ms: number) => line({ type: 'assistant', message: { id: `a${clock.now() + ms}`, stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash', input: {} }] } }, ms)
+  const result = (ms: number) => line({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }, ms)
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Find' }, { do: 'agent', name: 'Explorer', status: 'working', task: 'Find it' }, { do: 'event', type: 'dispatch', from: 'orchestrator', to: 'explorer', text: 'Find it' }] } as never)
+  files.set(path, line({ type: 'user', message: { content: 'Find it' } }, 10) + call(20))
+  await clock.advance(4100)
+  expect(agentOf(files, 'Explorer')?.status).toBe('working')
+  // The report line (its tool call still the transcript's last entry): In review at once, no wait.
+  files.set(path, `${files.get(path)}${call(30)}`)
+  await $.tool.call({ tool: TOOL, as: 'explorer', updates: [{ do: 'say', type: 'report', text: 'Done: found it in io.ts' }] } as never)
+  expect(agentOf(files, 'Explorer')).toMatchObject({ status: 'in_review', currentTask: 'Done: found it in io.ts' })
+  // The same turn runs on (the call's result, one more call): every read leaves it In review.
+  for (const ms of [200, 400, 600]) {
+    files.set(path, `${files.get(path)}${result(ms)}${call(ms + 50)}`)
+    await clock.advance(1100)
+    expect(agentOf(files, 'Explorer')?.status).toBe('in_review')
+  }
+  // The turn ends: still In review, never having left it.
+  files.set(path, `${files.get(path)}${line({ type: 'assistant', message: { id: 'end', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } }, 900)}`)
+  await clock.advance(1100)
+  expect(agentOf(files, 'Explorer')).toMatchObject({ status: 'in_review', currentTask: 'Done: found it in io.ts' })
+  expect(logOf(files).filter(entry => entry.startsWith('agent explorer') || entry.includes('Back at work'))).toEqual([])
+})
+
+test('the landing hold, as logic: the old look until the shot lands, each queued shot at its own landing, the real state last', () => {
+  const at = Date.UTC(2026, 0, 1, 9)
+  const worker = (status: McAgent['status'], currentTask: string): McAgent => ({ id: 'worker', name: 'Worker', status, currentTask, startedAt: at })
+  const ev = (type: McEvent['type'], from: string, to: string, text: string): McEvent => ({ time: at, type, from, to, text, taskId: 't' })
+  expect(shotTargets(ev('progress', 'worker', '', 'x'))).toEqual([])
+  expect(shotTargets(ev('agent_done', 'orchestrator', '', 'Accepted: Worker, Tester'))).toEqual(['worker', 'tester'])
+  const before = new Map([['worker', worker('idle', '')]])
+  // A brief, then an accept queued behind it on the same line: landing at +800 and +1600.
+  const holds = addHolds(new Map(), [{ event: ev('dispatch', 'orchestrator', 'worker', 'Fix it'), at: at + 800 }, { event: ev('agent_done', 'worker', 'orchestrator', 'Fixed'), at: at + 1600 }], before)
+  const real = [worker('done', 'Fixed')]
+  const lookAt = (now: number) => heldAgents(real, holds, now, 0).agents[0]
+  expect(lookAt(at + 799)).toMatchObject({ status: 'idle' })
+  expect(lookAt(at + 800)).toMatchObject({ status: 'working', currentTask: 'Fix it' })
+  expect(lookAt(at + 1599)).toMatchObject({ status: 'working' })
+  // The last landing: the real state, the latest one, and the hold is gone.
+  expect(lookAt(at + 1600)).toEqual(real[0])
+  expect(heldAgents(real, holds, at + 1600, 0).holds.size).toBe(0)
+  // With a lead (the swap's hold-back), each switch is drawn that much earlier, so it appears on landing.
+  expect(heldAgents(real, holds, at + 800 - GHOST_MS, GHOST_MS).agents[0]).toMatchObject({ status: 'working' })
+  expect(heldAgents(real, holds, at + 300, GHOST_MS).nextAt).toBe(at + 800 - GHOST_MS)
+})
+
+test('the landing hold in the pane: card, node, line and circle switch together when the shot lands; none on opening, for progress, or when not live', async ($, on) => {
+  const { files, clock } = engine(on)
+  type Node = { type?: string; props?: Record<string, unknown>; children?: unknown }
+  const kids = (node: Node): Node[] => {
+    const children = node.children ?? node.props?.children
+    return (Array.isArray(children) ? children : children === undefined ? [] : [children]).filter((kid): kid is Node => typeof kid === 'object' && kid !== null)
+  }
+  // What is on screen: drawings outside any hidden box (the swap loads a new one hidden beside the old).
+  const visible = (node: Node): Node[] => (node.props?.display === 'none' ? [] : node.type === 'Svg' ? [node] : kids(node).flatMap(visible))
+  // One pane, kept open, as on screen (mounted once the session starts): drawn at each moment that matters.
+  let mounted: { redraw: () => Promise<void>; drawn: () => Promise<unknown>; unmount: () => Promise<void> } | undefined
+  const agentsNow = async () => {
+    // No redraw asked by the test: what the pane shows is what the engine drew on its own.
+    const ui = mounted ?? (mounted = await $.ui.mount({ ...PANE, surface: 'desktop' }))
+    const svgs = visible((await ui.drawn()) as Node)
+    const agents = svgs.find(svg => String(svg.props?.alt).startsWith('Agents.'))
+    const shots = svgs.find(svg => String(svg.props?.alt) === 'Messages between the agents')
+    return { alt: String(agents?.props?.alt), svg: String(agents?.props?.source), shots: String(shots?.props?.source ?? '') }
+  }
+  const stateWith = (status: string, currentTask: string, extra: object = {}) =>
+    JSON.stringify({ task: { id: 't', title: 'T', status: 'running', startedAt: 1, ...extra }, plan: null, queue: [], agents: [{ id: 'worker', name: 'Worker', status, currentTask, startedAt: clock.now(), taskId: 't' }], orchestrator: { status: 'idle', waitingOn: [], reviewing: [] }, lastUpdated: clock.now() })
+  const log = (type: string, from: string, to: string, text: string) => `${files.get(EVENTS) ?? ''}${JSON.stringify({ time: clock.now(), type, from, to, text, taskId: 't' })}\n`
+  // Opening: what is there shows at once (an In review card with its report already logged).
+  files.set(STATE, stateWith('in_review', 'Done: first'))
+  files.set(EVENTS, log('report', 'worker', 'orchestrator', 'Done: first'))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // The reader reads once a second from the start: `read` moves to its next read, T.
+  const base = clock.now()
+  const read = () => clock.advance(1000 - ((clock.now() - base) % 1000))
+  await read()
+  expect((await agentsNow()).alt).toContain('Worker: in review')
+
+  // Outgoing: a brief read at T. Until T + SHOT_MS the card and node keep their look, the shot rides its line.
+  files.set(STATE, stateWith('working', 'Fix the header'))
+  files.set(EVENTS, log('dispatch', 'orchestrator', 'worker', 'Fix the header'))
+  await read()
+  // Nothing written and nothing drawn by the test from here: the pane must switch on its own.
+  await clock.advance(SHOT_MS - 1)
+  const going = await agentsNow()
+  expect(going.alt).toContain('Worker: in review')
+  expect(going.svg).not.toContain('Fix the header')
+  expect(going.shots).toMatch(/stroke-dasharray/)
+  // Within 150ms of the landing (the swap's own redraw lands at most a tick of its timer after).
+  await clock.advance(150)
+  const landed = await agentsNow()
+  expect(landed.alt).toContain('Worker: working')
+  expect(landed.svg).toContain('Fix the header')
+
+  // Incoming: a report read at T. The circle's word and the card switch together at T + SHOT_MS.
+  files.set(STATE, stateWith('in_review', 'Done: header fixed'))
+  files.set(EVENTS, log('report', 'worker', 'orchestrator', 'Done: header fixed'))
+  await read()
+  await clock.advance(SHOT_MS - 1)
+  const coming = await agentsNow()
+  expect(coming.alt).toContain('Worker: working')
+  expect(coming.svg).toContain('>WAITING<')
+  await clock.advance(150)
+  const arrived = await agentsNow()
+  expect(arrived.alt).toContain('Worker: in review')
+  expect(arrived.svg).toContain('>REVIEWING<')
+
+  // A progress line fires no shot: no hold (the change shows as soon as the swap shows it).
+  files.set(STATE, stateWith('working', 'Back on it'))
+  files.set(EVENTS, log('progress', 'worker', '', 'Back on it'))
+  await read()
+  await clock.advance(GHOST_MS + 150)
+  expect((await agentsNow()).alt).toContain('Worker: working')
+
+  // A paused task: the pane is not live, no shots play, so nothing is held.
+  files.set(STATE, stateWith('in_review', 'Done: paused', { status: 'paused', pausedAt: clock.now() }))
+  files.set(EVENTS, log('report', 'worker', 'orchestrator', 'Done: paused'))
+  await read()
+  await clock.advance(GHOST_MS + 150)
+  expect((await agentsNow()).alt).toContain('Worker: in review')
+  await mounted?.unmount()
 })

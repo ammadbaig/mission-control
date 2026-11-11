@@ -48,6 +48,7 @@ const EVENT_TYPES: EventType[] = [
   'needs_user',
   'plan_changed',
   'user_message',
+  'task_started',
   'task_done',
   'task_failed',
   'progress',
@@ -118,6 +119,7 @@ export function parseState(raw: string): McState | null {
       ...(typeof orchestrator.since === 'number' ? { since: orchestrator.since } : {}),
       // While its own turn runs: when that turn began.
       ...(typeof orchestrator.turn === 'number' ? { turn: orchestrator.turn } : {}),
+      ...(typeof orchestrator.turnLog === 'string' && orchestrator.turnLog ? { turnLog: orchestrator.turnLog } : {}),
     },
     lastUpdated: num(value.lastUpdated),
   }
@@ -206,7 +208,11 @@ export function orchestratorOf(state: McState | null, now?: number): McState['or
   const reviewing = state.agents.filter(agent => agent.status === 'in_review').map(agent => agent.name)
   const waitingOn = state.agents.filter(agent => agent.status === 'working').map(agent => agent.name)
   const lastChange = Math.max(0, ...state.agents.map(agent => agent.startedAt))
-  const kept = { ...(orch.since === undefined ? {} : { since: orch.since }), ...(orch.turn === undefined ? {} : { turn: orch.turn }) }
+  const kept = {
+    ...(orch.since === undefined ? {} : { since: orch.since }),
+    ...(orch.turn === undefined ? {} : { turn: orch.turn }),
+    ...(orch.turnLog === undefined ? {} : { turnLog: orch.turnLog }),
+  }
   const as = (status: OrchStatus): McState['orchestrator'] => ({ status, waitingOn, reviewing, ...kept })
   const stands = ORCH_OWN.has(orch.status) && orch.since !== undefined && orch.since + SAME_CALL_MS >= lastChange
   const finishedAt = state.task?.finishedAt
@@ -225,6 +231,51 @@ export function orchestratorOf(state: McState | null, now?: number): McState['or
   if (!running) return as(done ? 'done' : 'idle')
   // A running task with no agent busy: what it set, unless that was waiting or reviewing on no one.
   return as(orch.status === 'waiting' || orch.status === 'reviewing' ? 'idle' : orch.status)
+}
+
+/** The kinds of event that say an agent took part in a task. */
+export const PART_TYPES: ReadonlySet<string> = new Set(['dispatch', 'report', 'progress', 'agent_done'])
+/** A report that says nothing of its own: the automatic hand-in with no report line. */
+const BARE_REPORT = 'Handed in'
+/** The longest result line a card is given (its task line's length). */
+const RESULT_MAX = 80
+const cut = (text: string): string => (text.length <= RESULT_MAX ? text : `${text.slice(0, RESULT_MAX - 1).trimEnd()}…`)
+
+/**
+ * What each agent did in task `taskId`, by lower-case name, from that task's own events (side work
+ * and other tasks' left out): the words it was accepted with, else "Reported: <its report line>",
+ * else "Did: <its last brief>", else "Took part in this task" (its own progress lines only). An agent
+ * with none of these had no part, and has no entry.
+ */
+export function resultsOf(events: McEvent[], taskId: string): Record<string, string> {
+  const parts = new Map<string, { accepted?: string; report?: string; did?: string }>()
+  const of = (name: string) => {
+    const id = name.trim().toLowerCase()
+    const part = parts.get(id) ?? {}
+    parts.set(id, part)
+    return part
+  }
+  for (const event of events) {
+    if (event.taskId !== taskId || event.side || !PART_TYPES.has(event.type)) continue
+    if (event.type === 'dispatch') of(event.to).did = event.text
+    else if (event.type === 'report' && event.text !== BARE_REPORT) of(event.from).report = event.text
+    else if (event.type === 'report' || event.type === 'progress') of(event.from)
+    else if (event.from.trim().toLowerCase() !== 'orchestrator') {
+      // An accept of one agent, from it: the words it was accepted with, unless only "Accepted".
+      const part = of(event.from)
+      if (event.text && event.text !== 'Accepted') part.accepted = event.text
+    } else {
+      // An accept of several, from the orchestrator: "Accepted: A, B" names them.
+      const names = /^Accepted: (.+)$/.exec(event.text)?.[1]
+      for (const name of names?.split(',') ?? []) if (name.trim()) of(name)
+    }
+  }
+  const results: Record<string, string> = {}
+  for (const [id, part] of parts) {
+    if (!id || id === 'orchestrator') continue
+    results[id] = cut(part.accepted ?? (part.report ? `Reported: ${part.report}` : part.did ? `Did: ${part.did}` : 'Took part in this task'))
+  }
+  return results
 }
 
 /**

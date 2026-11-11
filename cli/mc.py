@@ -79,7 +79,7 @@ ORCH_OWN = ("planning", "dispatching", "working", "needs_user")
 SAME_CALL_MS = 64
 EVENT_TYPES = (
     "dispatch", "report", "handoff", "agent_done", "needs_user",
-    "plan_changed", "user_message", "task_done", "task_failed", "progress",
+    "plan_changed", "user_message", "task_started", "task_done", "task_failed", "progress",
     "task_paused", "task_resumed",
 )
 PROGRESS_GAP_MS = 5000
@@ -175,6 +175,7 @@ def normalize(data):
         "orchestrator": {**({"since": orch["since"]} if _num(orch.get("since"), None) is not None else {}),
                          # While its own turn runs (the plugin, in the orchestrator's session): when it began.
                          **({"turn": orch["turn"]} if _num(orch.get("turn"), None) is not None else {}),
+                         **({"turnLog": orch["turnLog"]} if isinstance(orch.get("turnLog"), str) and orch["turnLog"] else {}),
                          "status": _one_of(orch.get("status"), ORCH_STATUSES, "idle"),
                          "waitingOn": [name for name in waiting if isinstance(name, str)],
                          "reviewing": [name for name in reviewing if isinstance(name, str)]},
@@ -285,15 +286,22 @@ def orchestrator_of(state):
     elif status in ("waiting", "reviewing"):
         status = "idle"
     return {"status": status, "waitingOn": waiting_on, "reviewing": reviewing, **since,
-            **({"turn": turn} if turn is not None else {})}
+            **({"turn": turn} if turn is not None else {}), **turn_log(orch)}
+
+
+def turn_log(orch):
+    """The transcript of the orchestrator's running turn (written by the plugin), kept as it is."""
+    log = (orch or {}).get("turnLog")
+    return {"turnLog": log} if isinstance(log, str) and log else {}
 
 
 def rest_orchestrator(state, status):
     """A task starts or ends: the orchestrator's own status starts over too (idle, or done after task
     done), so nothing it set under one task stays in the circle after it. Its turn is kept."""
-    turn = (state.get("orchestrator") or {}).get("turn")
+    orch = state.get("orchestrator") or {}
+    turn = orch.get("turn")
     state["orchestrator"] = {"status": status, "waitingOn": [], "reviewing": [], "since": now_ms(),
-                             **({"turn": turn} if isinstance(turn, (int, float)) else {})}
+                             **({"turn": turn} if isinstance(turn, (int, float)) else {}), **turn_log(orch)}
 
 
 def save(state):
@@ -344,7 +352,25 @@ def automatic_twin(kind, sender, target, at, lines):
     return None
 
 
-def append_event(kind, sender, target, text, at=None, side=False):
+TASK_ENDS = ("task_started", "task_done", "task_failed")
+
+
+def task_end_twin(kind, task_id, lines):
+    """The index of the log line logging the same start or end (`kind`) of the same task, with
+    whether the plugin or this writer wrote it automatically; None when there is none."""
+    if not task_id:
+        return None
+    for index in range(len(lines) - 1, max(-1, len(lines) - 201), -1):
+        try:
+            event = json.loads(lines[index])
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == kind and event.get("taskId") == task_id:
+            return index, event.get("auto") is True
+    return None
+
+
+def append_event(kind, sender, target, text, at=None, side=False, auto=False):
     if kind not in EVENT_TYPES:
         sys.exit("event type must be one of: " + ", ".join(EVENT_TYPES))
     event = {"time": at or now_ms(), "type": kind, "from": clip(sender, NAME_MAX).lower(), "to": clip(target, NAME_MAX).lower(),
@@ -355,8 +381,23 @@ def append_event(kind, sender, target, text, at=None, side=False):
         event["taskId"] = task_id
     if side:
         event["side"] = True
+    if auto:
+        event["auto"] = True
     line = json.dumps(event, ensure_ascii=False)
     os.makedirs(HOME, exist_ok=True)
+    if kind in TASK_ENDS:
+        # One line per task's start or end: an automatic one gives way to someone's own, either order.
+        try:
+            with open(EVENTS, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            lines = []
+        twin = task_end_twin(kind, task_id, lines)
+        if twin is not None and auto:
+            return
+        if twin is not None and twin[1]:
+            del lines[twin[0]]
+            atomic_write(EVENTS, "".join(line + "\n" for line in lines if line.strip() and "\ufffd" not in line))
     if kind in ("dispatch", "report"):
         # This writer's copy wins over the plugin's automatic one: that line goes, this one is added.
         try:
@@ -436,6 +477,7 @@ def find_step(plan, ref):
 
 def cmd_task(args):
     state = load()
+    logged = None
     if args.action == "start":
         if not args.title:
             sys.exit("task start needs --title")
@@ -443,6 +485,7 @@ def cmd_task(args):
                          "status": "running", "startedAt": now_ms()}
         rest_agents(state)
         rest_orchestrator(state, "idle")
+        logged = ("task_started", "Started")
     elif args.action == "pause":
         if not state["task"] or state["task"]["status"] != "running":
             sys.exit("only a running task can be paused")
@@ -471,7 +514,12 @@ def cmd_task(args):
                     step["status"] = "done"
         rest_agents(state)
         rest_orchestrator(state, "done" if args.action == "done" else "idle")
+        logged = ("task_done", "Finished") if args.action == "done" else ("task_failed", "Failed")
     save(state)
+    # After the save, so it carries the task's id (a new one for a start). Automatic: the
+    # orchestrator's own task_done or task_failed for this task takes its place.
+    if logged:
+        append_event(logged[0], "orchestrator", "", logged[1], auto=True)
 
 
 def cmd_plan(args):
@@ -570,7 +618,7 @@ def cmd_orch(args):
     # --reviewing are still accepted from older scripts, and ignored.
     turn = state["orchestrator"].get("turn")
     state["orchestrator"] = {"status": args.status, "waitingOn": [], "reviewing": [], "since": now_ms(),
-                             **({"turn": turn} if isinstance(turn, (int, float)) else {})}
+                             **({"turn": turn} if isinstance(turn, (int, float)) else {}), **turn_log(state["orchestrator"])}
     save(state)
 
 

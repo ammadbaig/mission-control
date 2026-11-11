@@ -95,6 +95,7 @@ export const DEDUPE_MS = 10 * 60_000
  * dispatch to an agent before it has reported, within DEDUPE_MS. Names compare without case.
  */
 function repeated(lines: string[], event: McEvent): { index: number; auto: boolean } | null {
+  if (TASK_ENDS.has(event.type)) return sameTaskEnd(lines, event)
   if (event.type !== 'dispatch' && event.type !== 'report') return null
   const agent = (event.type === 'report' ? event.from : event.to).toLowerCase()
   for (let index = lines.length - 1, seen = 0; index >= 0 && seen < 200; index--, seen++) {
@@ -113,6 +114,25 @@ function repeated(lines: string[], event: McEvent): { index: number; auto: boole
     if (!isReport && !isDispatch) continue
     const same = event.type === 'report' ? isReport : isDispatch && event.time - Number(earlier.time) <= DEDUPE_MS
     return same ? { index, auto: earlier.auto === true } : null
+  }
+  return null
+}
+
+/** A task's start or end: one line each per task, whoever logs it. */
+const TASK_ENDS: ReadonlySet<string> = new Set(['task_started', 'task_done', 'task_failed'])
+/** The line logging the same start or end of the same task as `event`, if any (within the last 200). */
+function sameTaskEnd(lines: string[], event: McEvent): { index: number; auto: boolean } | null {
+  if (!event.taskId) return null
+  for (let index = lines.length - 1, seen = 0; index >= 0 && seen < 200; index--, seen++) {
+    const line = lines[index]?.trim()
+    if (!line) continue
+    let earlier: Partial<McEvent>
+    try {
+      earlier = JSON.parse(line) as Partial<McEvent>
+    } catch {
+      continue
+    }
+    if (earlier.type === event.type && earlier.taskId === event.taskId) return { index, auto: earlier.auto === true }
   }
   return null
 }
@@ -200,7 +220,7 @@ export function report($: EngineInterface, updates: Report[] | ((state: McState)
  * The orchestrator's own turn begins (`open`) or ends (writer.ts `turnState`). A state file that is
  * not a state is left for the next report to keep.
  */
-export function writeTurn($: EngineInterface, open: boolean): Promise<void> {
+export function writeTurn($: EngineInterface, open: boolean, log = ''): Promise<void> {
   return serially(async () => {
     const { state: STATE_FILE } = await pathsOf($)
     if (!STATE_FILE) return
@@ -209,7 +229,7 @@ export function writeTurn($: EngineInterface, open: boolean): Promise<void> {
     const stored = stateFrom(raw, await $.clock.now())
     // Ending a turn that is not stored (already ended, or never opened) writes nothing.
     if (stored.bad || (!open && stored.state.orchestrator.turn === undefined)) return
-    const state = settled(turnState(stored.state, open, await $.clock.now()))
+    const state = settled(turnState(stored.state, open, await $.clock.now(), log))
     await $.fs.write(STATE_FILE, stateText(state))
     onWritten?.(state)
     alsoWritten?.()

@@ -15,6 +15,7 @@ export type EventType =
   | 'needs_user'
   | 'plan_changed'
   | 'user_message'
+  | 'task_started'
   | 'task_done'
   | 'task_failed'
   /** An agent's own line about its work, mid-job (written by the agent itself). */
@@ -43,8 +44,12 @@ export type McState = {
   queue: McQueueItem[]
   agents: McAgent[]
   /** `reviewing`: the agents whose reports it is reading, while its status is reviewing. */
-  /** `since`: when it last set its own status. `turn`: when its own turn began, while it runs (the plugin, in its own session). */
-  orchestrator: { status: OrchStatus; waitingOn: string[]; reviewing: string[]; since?: number; turn?: number }
+  /**
+   * `since`: when it last set its own status. `turn`: when its own turn began, while it runs (the
+   * plugin, in its own session), and `turnLog` its session's transcript, where a pane reads whether
+   * that turn has ended however it ended.
+   */
+  orchestrator: { status: OrchStatus; waitingOn: string[]; reviewing: string[]; since?: number; turn?: number; turnLog?: string }
   lastUpdated: number
 }
 export type McEvent = {
@@ -71,10 +76,17 @@ export type MissionData = {
   events: McEvent[]
   eventCount: number
   fresh: McEvent[]
+  /** When each of `fresh` was read (its shot's start); absent, `readAt` for all. */
+  freshAt?: number[]
   readAt: number
   offline: boolean
   /** The newest change time of state.json or events.jsonl the reader saw: a sign of life. */
   aliveAt?: number
+  /**
+   * When the current task has finished or failed: what each agent that took part in it did, by its
+   * lower-case name (model.ts `resultsOf`), for its idle card. Absent otherwise.
+   */
+  results?: Record<string, string>
 }
 
 declare module 'claude-code' {

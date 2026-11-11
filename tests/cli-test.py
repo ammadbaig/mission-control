@@ -130,6 +130,26 @@ with tempfile.TemporaryDirectory() as folder:
     run(folder, "task", "done")
     check("turn: task done in the turn shows done", status() == "done" and "turn" in state(folder)["orchestrator"], str(state(folder)["orchestrator"]))
 
+with tempfile.TemporaryDirectory() as folder:
+    # task start / done / fail log their own line, with the task's id; someone's own task_done replaces it.
+    events = lambda: [json.loads(line) for line in pathlib.Path(folder, "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    run(folder, "task", "start", "--title", "One")
+    first = state(folder)["task"]["id"]
+    run(folder, "task", "done")
+    run(folder, "task", "start", "--title", "Two")
+    second = state(folder)["task"]["id"]
+    run(folder, "event", "task_done", "--from", "orchestrator", "--text", "Two shipped")
+    run(folder, "task", "done")
+    run(folder, "task", "start", "--title", "Three")
+    third = state(folder)["task"]["id"]
+    run(folder, "task", "fail")
+    run(folder, "event", "task_failed", "--from", "orchestrator", "--text", "Three blocked on review")
+    got = [(e["type"], e["text"], e.get("taskId")) for e in events()]
+    check("task events: Started, Finished and Failed with the task's id, someone's own copy kept in either order",
+          got == [("task_started", "Started", first), ("task_done", "Finished", first),
+                  ("task_started", "Started", second), ("task_done", "Two shipped", second),
+                  ("task_started", "Started", third), ("task_failed", "Three blocked on review", third)], str(got))
+
 # The hand-in words: the same cases as the plugin's test (tests/mission.test.tsx).
 spec = __import__("importlib.util").util.spec_from_file_location("mc", CLI)
 mc = __import__("importlib.util").util.module_from_spec(spec)
