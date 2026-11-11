@@ -1,5 +1,5 @@
 import { avatar, chevronRight, dot, liveBars, orbit, ORCH_DISC_R, orchestratorNode, orchRingOf, type Look } from './icons'
-import { isOffline, isStale, ORCH_LABELS, orchestratorOf, REVIEW_STALE_MS, type McAgent, type McEvent, type McState, type McStep, type MissionData } from './model'
+import { isOffline, ORCH_LABELS, orchestratorOf, REVIEW_STALE_MS, type McAgent, type McEvent, type McState, type McStep, type MissionData } from './model'
 import { baseline, clock, duration, fit, text, timeOfDay, widthOf, wrap } from './text'
 import { alpha, TOKENS, W, type Actor, type ThemeMode, type Tokens } from './tokens'
 
@@ -34,7 +34,8 @@ const offlineOf = (data: MissionData, now: number): boolean => modeOf(data, now)
 /**
  * How the pane stands: loading (nothing read yet); live; paused (the orchestrator stopped the task
  * on purpose); offline (a running task with nothing written for a minute); idle (no task running,
- * and the orchestrator not at work).
+ * and the circle says IDLE). With no task running the chip follows the circle, from the same value:
+ * LIVE while it shows anything but IDLE (its 30 seconds of DONE included), IDLE in the same draw as it.
  */
 export type Mode = 'loading' | 'live' | 'paused' | 'offline' | 'idle'
 export const modeOf = (data: MissionData, now: number): Mode => {
@@ -43,8 +44,7 @@ export const modeOf = (data: MissionData, now: number): Mode => {
   const task = state?.task
   if (task?.status === 'paused') return 'paused'
   if (task?.status === 'running') return data.offline || isOffline(state, now, data.aliveAt) ? 'offline' : 'live'
-  const orch = orchestratorOf(state).status
-  return orch !== 'idle' && orch !== 'done' && !isStale(state, now, data.aliveAt) ? 'live' : 'idle'
+  return orchestratorOf(state, now).status === 'idle' ? 'idle' : 'live'
 }
 
 const m = (ctx: Ctx, classes: string): string => (ctx.motion ? classes : '')
@@ -197,18 +197,21 @@ const clockStyle = (lines: number[]): string =>
 export const PILL_WORD: Record<Mode, string> = { loading: 'SYNCING', live: 'LIVE', paused: 'PAUSED', offline: 'OFFLINE', idle: 'IDLE' }
 
 /**
- * The pill: LIVE in green, its dot pulsing; PAUSED and IDLE calm (secondary words, a still dot, an
- * 8% border); OFFLINE and SYNCING quiet (tertiary).
+ * The pill: LIVE in green, its dot pulsing; PAUSED in Needs you's amber, built the same way, its dot
+ * still; IDLE calm (secondary words, a still dot, an 8% border); OFFLINE and SYNCING quiet (tertiary).
  */
 const pillBody = (ctx: Ctx, right: number, cy: number): string => {
   const { T } = ctx
   const word = PILL_WORD[ctx.mode]
   const live = ctx.mode === 'live'
-  const calm = ctx.mode === 'paused' || ctx.mode === 'idle'
-  const ink = live ? T.ink.done : calm ? T.secondary : T.tertiary
-  const color = live ? T.done : calm ? T.secondary : T.tertiary
-  const fill = live ? T.liveFill : calm ? 'none' : T.quietFill
-  const line = live ? T.liveLine : calm ? (T.name === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)') : T.quietLine
+  const looks: Record<Mode, { ink: string; color: string; fill: string; line: string }> = {
+    live: { ink: T.ink.done, color: T.done, fill: T.liveFill, line: T.liveLine },
+    paused: { ink: T.ink.needs, color: T.needs, fill: T.pausedFill, line: T.pausedLine },
+    idle: { ink: T.secondary, color: T.secondary, fill: 'none', line: T.name === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
+    offline: { ink: T.tertiary, color: T.tertiary, fill: T.quietFill, line: T.quietLine },
+    loading: { ink: T.tertiary, color: T.tertiary, fill: T.quietFill, line: T.quietLine },
+  }
+  const { ink, color, fill, line } = looks[ctx.mode]
   const textWidth = word.length * (9 * 0.6 + 0.9)
   const width = 8 + 6 + 6 + textWidth + 8
   const x = right - width
@@ -1084,7 +1087,7 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
       const seat: [number, number] = [gx + sx, gy + sy]
       return look === 'working' ? flowingLink(ctx, String(index), seat, orchAt, 14, circle.disc + 1) : link(ctx, look, linkPath(seat, orchAt, 14, circle.disc + 1))
     }).join('')
-    const orchStatus = orchestratorOf(state).status
+    const orchStatus = orchestratorOf(state, now).status
     // The ring always turns, in every status and whether or not the pane is live (a paused task or a
     // quiet minute, as while the orchestrator waits on the person, stops the rest); only reduced
     // motion stops it (the `.m` rule).
@@ -1110,7 +1113,7 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
     }).join('')
     const orch =
       orchestratorNode(T, orchAt[0], orchAt[1], ringClass, ringStyle, orchStatus === 'needs_user', circle.disc) +
-      text(orchAt[0], baseline(orchAt[1] - 11, 12, 9), 'ORCH', { size: 9, fill: T.ink.orch, face: 'mono', weight: 500, tracking: 0.9, anchor: 'middle' }) +
+      text(orchAt[0], baseline(orchAt[1] - 11, 12, 9), 'ORCH', { size: 9, fill: orchStatus === 'needs_user' ? T.strong : T.ink.orch, face: 'mono', weight: 500, tracking: 0.9, anchor: 'middle' }) +
       orchStatusText(T, orchAt, ORCH_LABELS[orchStatus], orchStatus === 'needs_user', circle.disc)
     // The one-shot packets and pulses are a drawing of their own over this one (agentsPackets), so a
     // new event does not redraw the agents.

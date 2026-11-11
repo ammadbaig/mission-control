@@ -168,6 +168,8 @@ export const REVIEW_STALE_MS = 120_000
 export const ORCH_OWN: ReadonlySet<string> = new Set(['planning', 'dispatching', 'working', 'needs_user'])
 /** The ones that last only for the turn they were set in: dropped when its turn ends. */
 export const ORCH_TURN_ONLY: ReadonlySet<string> = new Set(['planning', 'dispatching', 'working'])
+/** How long the circle says DONE after a task ends, before it says IDLE (in the pane, at draw time). */
+export const DONE_SHOWN_MS = 30_000
 /** The updates of one call are timed a millisecond apart: an agent's change in the same call is not "after". */
 const SAME_CALL_MS = 64
 
@@ -194,8 +196,11 @@ export const ORCH_LABELS: Record<OrchStatus, string> = {
  * task in this turn, PLANNING or DISPATCHING if it set one in this turn and it stands, else WORKING;
  * outside a turn, what it set while that stands (a writer with no turns, such as the CLI); WAITING
  * while any agent works; DONE for a finished task, else IDLE (or what it set, while a task runs).
+ *
+ * With `now` (the pane, at draw time), DONE lasts DONE_SHOWN_MS from the task's end, then gives way
+ * to what comes next (WORKING in a running turn, else IDLE). The writers store it without `now`.
  */
-export function orchestratorOf(state: McState | null): McState['orchestrator'] {
+export function orchestratorOf(state: McState | null, now?: number): McState['orchestrator'] {
   const orch = state?.orchestrator ?? { status: 'idle' as const, waitingOn: [], reviewing: [] }
   if (!state) return orch
   const reviewing = state.agents.filter(agent => agent.status === 'in_review').map(agent => agent.name)
@@ -204,32 +209,35 @@ export function orchestratorOf(state: McState | null): McState['orchestrator'] {
   const kept = { ...(orch.since === undefined ? {} : { since: orch.since }), ...(orch.turn === undefined ? {} : { turn: orch.turn }) }
   const as = (status: OrchStatus): McState['orchestrator'] => ({ status, waitingOn, reviewing, ...kept })
   const stands = ORCH_OWN.has(orch.status) && orch.since !== undefined && orch.since + SAME_CALL_MS >= lastChange
+  const finishedAt = state.task?.finishedAt
+  const done = orch.status === 'done' && (now === undefined || finishedAt === undefined || now - finishedAt < DONE_SHOWN_MS)
   if (orch.status === 'needs_user' && stands) return as('needs_user')
   if (reviewing.length > 0) return as('reviewing')
   if (orch.turn !== undefined) {
     const thisTurn = orch.since !== undefined && orch.since >= orch.turn
-    if (orch.status === 'done' && thisTurn) return as('done')
+    if (done && thisTurn) return as('done')
     if ((orch.status === 'planning' || orch.status === 'dispatching') && stands && thisTurn) return as(orch.status)
     return as('working')
   }
   if (stands) return as(orch.status)
   if (waitingOn.length > 0) return as('waiting')
   const running = state.task?.status === 'running' || state.task?.status === 'paused'
-  if (!running) return as(orch.status === 'done' ? 'done' : 'idle')
+  if (!running) return as(done ? 'done' : 'idle')
   // A running task with no agent busy: what it set, unless that was waiting or reviewing on no one.
   return as(orch.status === 'waiting' || orch.status === 'reviewing' ? 'idle' : orch.status)
 }
 
 /**
  * What changes with time alone in the pane: the minutes of each review past REVIEW_STALE_MS, and
- * whether the orchestrator's own status still stands. The reader redraws when it changes.
+ * the orchestrator's status as shown now (its own lapsing, DONE ending after DONE_SHOWN_MS). The
+ * reader, once a second, redraws when it changes.
  */
 export function clockKeyOf(state: McState | null, now: number): string {
   if (!state) return ''
   const minutes = state.agents
     .filter(agent => agent.status === 'in_review' && now - agent.startedAt > REVIEW_STALE_MS)
     .map(agent => `${agent.name}:${Math.floor((now - agent.startedAt) / 60_000)}`)
-  return `${minutes.join(',')}|${orchestratorOf(state).status}`
+  return `${minutes.join(',')}|${orchestratorOf(state, now).status}`
 }
 
 /**

@@ -71,6 +71,11 @@ export type Tokens = {
   /** The live pill's fill and border. */
   liveFill: string
   liveLine: string
+  /** The PAUSED chip, built as LIVE's from green, from Needs you's amber (its ink: ink.needs, 6.90 / 5.16 on it). */
+  pausedFill: string
+  pausedLine: string
+  /** The strongest text: the ORCH label on the needs-you disc (11.73 / 14.74 on its tint). */
+  strong: string
   quietFill: string
   quietLine: string
 }
@@ -121,6 +126,9 @@ export const DARK: Tokens = {
   glowCard: 0.16,
   liveFill: a(darkStatus.done, 0.1),
   liveLine: a(darkStatus.done, 0.25),
+  pausedFill: a(darkStatus.needs, 0.1),
+  pausedLine: a(darkStatus.needs, 0.25),
+  strong: '#FFFFFF',
   quietFill: 'rgba(91,103,126,0.12)',
   quietLine: 'rgba(91,103,126,0.35)',
 }
@@ -165,6 +173,9 @@ export const LIGHT: Tokens = {
   glowCard: 0.08,
   liveFill: a(lightStatus.done, 0.1),
   liveLine: a(lightStatus.done, 0.3),
+  pausedFill: a(lightStatus.needs, 0.1),
+  pausedLine: a(lightStatus.needs, 0.3),
+  strong: '#141821',
   quietFill: 'rgba(122,133,151,0.12)',
   quietLine: 'rgba(122,133,151,0.35)',
 }

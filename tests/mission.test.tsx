@@ -7,10 +7,10 @@ import { HAND_IN } from '../hooks/mission/io'
 import { turnOf } from '../hooks/mission/transcript'
 import { activityLines, overviewLines, plainOf } from '../hooks/mission/term'
 import { baseline, cellsOf } from '../hooks/mission/text'
-import { activitySummary, legendOf, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth } from '../hooks/mission/draw'
+import { activitySummary, legendOf, modeOf, pill, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth } from '../hooks/mission/draw'
 import { ORCH_DISC_R, orchestratorNode } from '../hooks/mission/icons'
-import { DARK, LIGHT } from '../hooks/mission/tokens'
-import { isOffline, OFFLINE_MS, ORCH_LABELS, orchestratorOf, type McAgent, type McEvent, type McState, type MissionData } from '../hooks/mission/model'
+import { alpha, DARK, LIGHT } from '../hooks/mission/tokens'
+import { clockKeyOf, DONE_SHOWN_MS, isOffline, OFFLINE_MS, ORCH_LABELS, orchestratorOf, type McAgent, type McEvent, type McState, type MissionData } from '../hooks/mission/model'
 import { apply, emptyState, turnState, type Report } from '../hooks/mission/writer'
 
 const PANE = {
@@ -518,6 +518,7 @@ test('a running task gone quiet is offline: the last known state, clearly old', 
 
 test('no task is idle, not offline, and an idle agent keeps no old words', async ($, on) => {
   const { files, clock } = engine(on)
+  on('classic.Stop', () => ({}))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never)
   await call([
@@ -527,6 +528,8 @@ test('no task is idle, not offline, and an idle agent keeps no old words', async
     { do: 'task.done' },
   ])
   expect(JSON.parse(files.get(STATE) ?? 'null').agents[0]).toMatchObject({ status: 'idle', currentTask: '' })
+  // The orchestrator's turn ends (while it runs the circle says WORKING and the chip LIVE).
+  await $.classic.Stop({ stop_hook_active: false } as never)
   await clock.advance(120_000)
   const idle = await drawn($)
   expect(idle.alts).toContain('Mission Control, idle')
@@ -1779,6 +1782,9 @@ test('the circle takes the needs-you colour and tint for needs_user, and its own
     const { svg } = await drawn($)
     const shown = orchestratorOf(JSON.parse(files.get(STATE) ?? 'null') as McState).status
     for (const T of [DARK, LIGHT]) {
+      // The ORCH label: the strongest text on the needs-you disc, else its purple.
+      expect(svg).toMatch(new RegExp(`fill="${shown === 'needs_user' ? T.strong : T.ink.orch}"[^>]*>ORCH<`))
+      expect(svg).not.toMatch(new RegExp(`fill="${shown === 'needs_user' ? T.ink.orch : T.strong}"[^>]*>ORCH<`))
       if (shown === 'needs_user') {
         expect(svg).toContain(`fill="${T.needsFill}"`)
         expect(svg).toContain(`fill="${T.ink.needs}"`)
@@ -1898,5 +1904,93 @@ test('the dashed ring turns in every orchestrator status, needs_user included, l
       const shown = orchestratorOf(JSON.parse(files.get(STATE) ?? 'null') as McState).status
       expect(svg).toMatch(new RegExp(`<g class="m spin${shown === 'dispatching' ? ' fast' : ''}" style="animation-delay:-\\d+ms">`))
     }
+  }
+})
+
+test('the circle says DONE for 30 seconds after a task ends, then IDLE, with nothing written in between', async ($, on) => {
+  const { files, clock } = engine(on)
+  on('tool.call', () => ({ result: 'ok' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // The word drawn right after ORCH in the circle (the task card has its own DONE).
+  const circleWord = async () => (await drawn($)).svg.match(/>ORCH<\/text><text[^>]*>([A-Z ]+)</)?.[1]
+  expect(DONE_SHOWN_MS).toBe(30_000)
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Solo' }, { do: 'task.done' }] } as never)
+  await $.classic.Stop({ stop_hook_active: false } as never)
+  const written = files.get(STATE)
+  const ended = Number(JSON.parse(written ?? 'null').task.finishedAt)
+  const chip = async () => (await drawn($)).alts.find(alt => alt.startsWith('Mission Control, '))
+  await clock.advance(ended + 29_000 - clock.now())
+  expect(await circleWord()).toBe('DONE')
+  expect(await chip()).toBe('Mission Control, live')
+  const before = clockKeyOf(JSON.parse(written ?? 'null') as McState, clock.now())
+  await clock.advance(2000)
+  expect(await circleWord()).toBe('IDLE')
+  expect(await chip()).toBe('Mission Control, idle')
+  // Nothing was written: the pane's clock alone changed it (its once-a-second key changes, so it redraws).
+  expect(files.get(STATE)).toBe(written)
+  expect(clockKeyOf(JSON.parse(written ?? 'null') as McState, clock.now())).not.toBe(before)
+  // The stored status is still the writers' DONE: old files and both writers need no change.
+  expect(JSON.parse(files.get(STATE) ?? 'null').orchestrator.status).toBe('done')
+
+  // A new task inside the 30 seconds shows its own status at once.
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Two' }, { do: 'task.done' }] } as never)
+  await $.classic.Stop({ stop_hook_active: false } as never)
+  await clock.advance(5000)
+  expect(await circleWord()).toBe('DONE')
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Three' }, { do: 'orch', status: 'planning' }] } as never)
+  await clock.advance(10)
+  expect(await circleWord()).toBe('PLANNING')
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.done' }] } as never)
+  await $.classic.Stop({ stop_hook_active: false } as never)
+  await clock.advance(5000)
+  expect(await circleWord()).toBe('DONE')
+  // The orchestrator's own turn after a finished task: WORKING, not DONE.
+  await $.prompt.submit({ text: 'Next', wait: false, origin: { kind: 'person' } } as never)
+  await clock.advance(10)
+  expect(await circleWord()).toBe('WORKING')
+})
+
+test('the chip follows the circle with no task running; PAUSED and OFFLINE keep their rules; a finished task is never OFFLINE', () => {
+  const at = Date.UTC(2026, 0, 1, 9)
+  const data = (state: McState, aliveAt = state.lastUpdated): MissionData => ({ loaded: true, state, events: [], eventCount: 0, fresh: [], readAt: at, offline: false, aliveAt })
+  const base = emptyState(at)
+  // No task: the orchestrator's turn running is LIVE (its circle WORKING), long after the last write too.
+  expect(modeOf(data(turnState(base, true, at)), at + 10 * 60_000)).toBe('live')
+  // No task, no turn: IDLE.
+  expect(modeOf(data(base), at + 1000)).toBe('idle')
+  // A question with no task: LIVE.
+  expect(modeOf(data(applied(base, [{ do: 'orch', status: 'needs_user' }], at)), at + 1000)).toBe('live')
+  // A finished task: LIVE for 30 seconds (never OFFLINE, though nothing is written), then IDLE.
+  const finished = applied(base, [{ do: 'task.start', title: 'T' }, { do: 'task.done' }], at)
+  const end = Number(finished.task?.finishedAt)
+  expect(modeOf(data(finished, end), end + 29_000)).toBe('live')
+  expect(modeOf(data(finished, end), end + 31_000)).toBe('idle')
+  expect(modeOf(data(finished, end), end + 10 * 60_000)).toBe('idle')
+  // Paused and offline as before.
+  const running = applied(base, [{ do: 'task.start', title: 'T' }], at)
+  expect(modeOf(data(applied(running, [{ do: 'task.pause' }], at + 10)), at + 10 * 60_000)).toBe('paused')
+  expect(modeOf(data(running), at + OFFLINE_MS + 1000)).toBe('offline')
+  expect(modeOf(data(running), at + 1000)).toBe('live')
+})
+
+test('the chip: PAUSED in the Needs you amber, LIVE in green, IDLE and OFFLINE as before', () => {
+  const at = Date.UTC(2026, 0, 1, 9)
+  const data = (state: McState): MissionData => ({ loaded: true, state, events: [], eventCount: 0, fresh: [], readAt: at, offline: false, aliveAt: at })
+  const running = applied(emptyState(at), [{ do: 'task.start', title: 'T' }], at)
+  const paused = applied(running, [{ do: 'task.pause' }], at + 10)
+  for (const T of [DARK, LIGHT]) {
+    const pausedChip = pill(data(paused), at + 1000, T.name).svg
+    expect(pausedChip).toContain(`fill="${T.pausedFill}" stroke="${T.pausedLine}"`)
+    expect(pausedChip).toMatch(new RegExp(`<circle[^>]*fill="${T.needs}"`))
+    expect(pausedChip).toMatch(new RegExp(`fill="${T.ink.needs}"[^>]*>PAUSED<`))
+    expect(T.pausedFill).toBe(alpha(T.needs, 0.1))
+    const liveChip = pill(data(running), at + 1000, T.name).svg
+    expect(liveChip).toContain(`fill="${T.liveFill}" stroke="${T.liveLine}"`)
+    expect(liveChip).toMatch(new RegExp(`fill="${T.ink.done}"[^>]*>LIVE<`))
+    expect(liveChip).not.toContain(T.needs)
+    const idleChip = pill(data(emptyState(at)), at + 1000, T.name).svg
+    expect(idleChip).toMatch(new RegExp(`fill="${T.secondary}"[^>]*>IDLE<`))
   }
 })

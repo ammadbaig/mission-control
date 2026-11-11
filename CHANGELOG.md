@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7
+
+- After `task.done` the orchestrator's circle says DONE for 30 seconds, then IDLE (or WORKING while its own turn runs), by itself with nothing written: the pane derives it from the task's end time each second. The task card still shows the finished task. A failed task's circle already said IDLE and is unchanged.
+- The header chip follows the circle when no task runs: LIVE while the circle shows anything but IDLE (the 30 seconds of DONE, the orchestrator's own turn, a question, a review, a helper at work), IDLE in the same draw as the circle. PAUSED and OFFLINE are unchanged; a finished task never shows OFFLINE.
+- The PAUSED chip is amber, the Needs you colour, built as the green LIVE chip is (amber text 6.90:1 dark, 5.16:1 light on it). On the needs-you circle the ORCH label is white (dark) or the strongest text colour (light), 11.73:1 and 14.74:1 on the tinted disc, in place of a purple that reached only 4.26:1 in dark.
+
 ## 1.0.6
 
 - The orchestrator's status in the circle is always right. `task.start`, `task.done` and `task.fail` start it over (IDLE, or DONE after `task.done`), so a PLANNING set during a solo task no longer stays on the finished task.
