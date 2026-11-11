@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- The `/mission size` command is gone; `/mission measure` still measures the row height and keeps it in `.panel.json`.
+
 ## 1.0.4
 
 - A changed drawing (an agent card switching status, say) no longer shows on top of the old one: the old one stays alone while the new one loads hidden, then the new one alone.

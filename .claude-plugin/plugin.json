@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A live side pane that shows what an orchestrating session and its helper agents are doing",
   "author": {
     "name": "Ammad Ahmed"

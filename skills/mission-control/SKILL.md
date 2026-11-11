@@ -60,7 +60,7 @@ A backstop for a helper with no transcript found: when the desktop app's record 
 
 The plugin knows an agent by a role's name in the session's title, handle or subagent type (Explorer, Worker, Tester, Security). For other names, `/mission agents Reviewer=local_1234` (a session id, handle or title words) maps one; `/mission agents` lists them. In a helper session, `/mission role tester` says which helper it is if its brief did not.
 
-The person's commands: `/mission` (open the pane; text in a terminal), `/mission ascii on|off|auto` (the terminal's glyphs), `/mission size <px>|auto` and `/mission measure` (the pane's row height), `/mission light|dark|auto` (theme), `/mission measure`, `/mission auto on|off` (automatic reporting), `/mission watch on|off` (the backstop), `/mission agents [role=pattern]`, `/mission role <role>|none`, `/mission debug on|off`.
+The person's commands: `/mission` (open the pane; text in a terminal), `/mission ascii on|off|auto` (the terminal's glyphs), `/mission light|dark|auto` (theme), `/mission measure` (the pane's row height), `/mission auto on|off` (automatic reporting), `/mission watch on|off` (the backstop), `/mission agents [role=pattern]`, `/mission role <role>|none`, `/mission debug on|off`.
 
 ## Pausing
 

@@ -42,8 +42,8 @@ let plainTerminal = false
  *   the desktop app at its default text size, where the panel then fills the pane's width.
  * - ROW_PX, one row's height, sets the Overview's height budget (bodyRows x ROW_PX). The desktop's
  *   row is a little under 21px (a 39-row pane cut its last cards at 21); slightly short is
- *   chosen over slightly tall, so no card ever falls below the pane. `/mission size <px>` sets it by
- *   hand and `/mission measure` measures it; either is kept in `.panel.json`.
+ *   chosen over slightly tall, so no card ever falls below the pane. `/mission measure` measures it,
+ *   kept in `.panel.json`.
  */
 const COLUMN_PX = 10.68
 const ROW_PX = 20.3
@@ -253,13 +253,13 @@ const inRange = (cell: number): boolean => cell >= (CELL_RANGE[0] ?? 12) && cell
 
 /** `/mission measure` is running: the pane shows the measuring drawing until it answers or gives up. */
 let measuringNow = false
-/** Where the cell in use came from: set with /mission size, measured, or the default. */
-type CellSource = 'size' | 'measured' | 'default'
+/** Where the cell in use came from: measured, or the default. */
+type CellSource = 'measured' | 'default'
 let cellSource: CellSource = 'default'
-/** The cell set or measured, kept beside state.json so every session draws at that size at once. */
+/** The measured cell, kept beside state.json so every session draws at that size at once. */
 const PANEL_FILE = '.panel.json'
 
-/** The cell set or measured before, with where it came from; null when none was (or the file is not one). */
+/** The cell measured before; null when none was (or the file is not one). */
 async function storedCell($: EngineInterface): Promise<{ cell: number; source: CellSource } | null> {
   const { dir } = await pathsOf($)
   if (!dir) return null
@@ -272,20 +272,14 @@ async function storedCell($: EngineInterface): Promise<{ cell: number; source: C
   }
   if (!value || typeof value !== 'object') return null
   const cell = 'cell' in value ? Number(value.cell) : 0
-  const source = 'source' in value && value.source === 'size' ? 'size' : 'measured'
-  return Number.isFinite(cell) && inRange(cell) ? { cell, source } : null
+  return Number.isFinite(cell) && inRange(cell) ? { cell, source: 'measured' } : null
 }
 
-/** Keeps a cell set or measured (never the default); `null` clears it, back to the default. */
-async function keepCell($: EngineInterface, cell: number | null, source: CellSource): Promise<void> {
+/** Keeps a measured cell (never the default). */
+async function keepCell($: EngineInterface, cell: number): Promise<void> {
   const { dir } = await pathsOf($)
-  if (!dir) return
-  if (cell === null) {
-    await $.fs.write(`${dir}/${PANEL_FILE}`, '{}\n')
-    return
-  }
-  if (!inRange(cell)) return
-  await $.fs.write(`${dir}/${PANEL_FILE}`, `${JSON.stringify({ cell, source, at: await $.clock.now() })}\n`)
+  if (!dir || !inRange(cell)) return
+  await $.fs.write(`${dir}/${PANEL_FILE}`, `${JSON.stringify({ cell, source: 'measured', at: await $.clock.now() })}\n`)
 }
 
 /** The last numbers written to the debug file, so it is written only on a change. */
@@ -392,7 +386,7 @@ export const registerMission: Register = on => {
         measuringNow = false
         cellSource = 'measured'
         await update($, cellPx, () => measured)
-        await keepCell($, measured, 'measured').catch(() => undefined)
+        await keepCell($, measured).catch(() => undefined)
         void $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
       }
     }
@@ -413,22 +407,6 @@ export const registerMission: Register = on => {
     }
     if (asked === 'light' || asked === 'dark' || asked === 'auto') {
       await update($, themeSetting, () => asked as MissionTheme)
-    }
-    if (words[0]?.toLowerCase() === 'size') {
-      // The row height by hand: `/mission size 20`, or `auto` for the default again.
-      const want = (words[1] ?? '').toLowerCase()
-      const px = Number(want)
-      if (want === 'auto') {
-        cellSource = 'default'
-        await keepCell($, null, 'default').catch(() => undefined)
-        await update($, cellPx, () => 0)
-        return { text: `Mission Control lays the panel out with the default row height (${ROW_PX}px).` }
-      }
-      if (!Number.isFinite(px) || !inRange(px)) return { text: `Use /mission size <px> (the pane's row height, ${CELL_RANGE[0]} to ${CELL_RANGE[1]}), or /mission size auto.` }
-      cellSource = 'size'
-      await keepCell($, px, 'size').catch(() => undefined)
-      await update($, cellPx, () => px)
-      return { text: `Mission Control lays the panel out with a ${px}px row height (a smaller one keeps more of it in the pane), kept for every session.` }
     }
     await $.ui.open({ id: PANE, title: TITLE })
     // From the top: the terminal follows a tall pane's end otherwise.

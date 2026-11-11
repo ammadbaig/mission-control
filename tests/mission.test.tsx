@@ -1405,7 +1405,7 @@ test('the panel is always drawn: at once with no measurement, and a resize redra
   expect(files.has(PANEL)).toBe(false)
 })
 
-test('/mission measure measures (its drawing only while asked) and keeps the result; /mission size sets it by hand', async ($, on) => {
+test('/mission measure measures (its drawing only while asked) and keeps the result', async ($, on) => {
   const { files, clock } = engine(on, { unmeasured: true })
   on('ui.scroll', () => ({}))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1417,10 +1417,6 @@ test('/mission measure measures (its drawing only while asked) and keeps the res
   await $.ui.scroll({ in: PANE.requestId, requestId: PANE.requestId, contentRows: 200, to: 'end' } as never)
   await clock.advance(10)
   expect(JSON.parse(files.get(PANEL) ?? '{}')).toMatchObject({ cell: 19.99, source: 'measured' })
-  await $.command.run({ command: 'mission', args: 'size 27', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
-  expect(JSON.parse(files.get(PANEL) ?? '{}')).toMatchObject({ cell: 27, source: 'size' })
-  await $.command.run({ command: 'mission', args: 'size auto', origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
-  expect(JSON.parse(files.get(PANEL) ?? '{}')).toEqual({})
 })
 
 test('/mission debug on writes the pane numbers on every change of columns or rows', async ($, on) => {
