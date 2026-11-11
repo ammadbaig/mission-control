@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- 1.0.1: the permission guess shows after 10 seconds (it was 30), so a person watching sees NEEDS YOU while the prompt is still open. A call with no tool name is never guessed at.
+
 ## 1.0.0
 
 - The Mission Control pane for the desktop app: the current task with its plan and latest update, the queue, the agents graph and cards, and the Activity view with every event.
@@ -46,4 +50,4 @@
 - Every status is per task: each agent's state and each event carry the task id current when written; a task's end (or a new task) makes every agent idle with no words, a paused task keeps its cards, and a state of another task shows idle. Old files without task ids count as the current task's. Work for something else is marked on its dispatch (`side`, `--side`): an "Other task ·" mark in the Activity view, "Other task: …" on the card while its session runs, idle when it ends.
 - A helper's question is NEEDS YOU by itself: the transcript watcher sees a turn that ends on a next-step question (`wrap_up` with `ask`) or a question tool waiting (`AskUserQuestion` with no result), shows the question (80 characters) and logs one `needs_user` event; the answer makes it working again. A final message ending with "?" does not count. The turn-end guard no longer names an agent showing Needs you.
 - The pane in the terminal, as text: the same data, rules and commands, laid out in the pane's columns and rows (title and pill, the task with its steps and caption, the latest update, up next, the agents with their state words and timers), fitted to short panes, with Activity on `a` and Back on `b`, the terminal theme's colours, and `/mission ascii on|off|auto` for plain ASCII. The plan's rules and each agent's words are shared with the desktop drawing (`planOf`, `STATE_WORD`, `messageOf`), so the two cannot disagree.
-- NEEDS YOU on a permission prompt: with the plugin in the helper's session, at once ("Allow or deny: <tool> <file or host>"), cleared when the call gets its result, is denied, or the turn ends; without it, a guess after 30 seconds from a tool call still waiting for its result ("May be waiting for your permission: <tool>"), never for shell commands, subagents, skills or waits, and never over the helper's own NEEDS YOU, a question, in review or done.
+- NEEDS YOU on a permission prompt: with the plugin in the helper's session, at once ("Allow or deny: <tool> <file or host>"), cleared when the call gets its result, is denied, or the turn ends; without it, a guess after 10 seconds from a tool call still waiting for its result ("May be waiting for your permission: <tool>"), never for shell commands, subagents, skills or waits, and never over the helper's own NEEDS YOU, a question, in review or done.

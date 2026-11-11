@@ -1324,15 +1324,16 @@ test("a helper's own permission prompt clears on allow, on deny, and when its tu
   expect(agentOf(files, 'Explorer')?.status).toBe('working')
 })
 
-test('with no plugin in the helper: a stalled call is a guessed NEEDS YOU after 30 seconds; shell commands never are', async ($, on) => {
+test('with no plugin in the helper: a stalled call is a guessed NEEDS YOU after 10 seconds; shell commands never are', async ($, on) => {
   const { files, clock, path } = await withHelper($, on)
   await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Preview' }, { do: 'agent', name: 'Tester', status: 'working', task: 'Checking the previews' }] } as never)
   // The real shape: a preview_start call, then nothing (a prompt waits on the person).
   const t = clock.now()
   files.set(path, said('user', t, 'Look at the preview') + said('assistant', t + 100, [{ type: 'tool_use', id: 'p1', name: 'mcp__Claude_Browser__preview_start', input: { url: 'file:///x/helper-question.html' } }], 'tool_use'))
-  await clock.advance(10_000)
+  await clock.advance(5_000)
   expect(agentOf(files, 'Tester')?.status).toBe('working')
-  await clock.advance(21_500)
+  // Shown within a second of the 10-second mark (the watcher looks every second while a call waits).
+  await clock.advance(6_000)
   expect(agentOf(files, 'Tester')).toMatchObject({ status: 'needs_user', currentTask: 'May be waiting for your permission: preview_start' })
   expect(logOf(files)).toContain('needs_user tester>orchestrator: May be waiting for your permission: preview_start')
   // Its result arrives: working again by itself.

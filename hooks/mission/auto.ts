@@ -754,7 +754,7 @@ async function followTranscripts($: EngineInterface, force = false): Promise<voi
     follow.turn = turn
     moved = true
   }
-  // While a call waits for its result, look every second: the guess is due 30 seconds after it.
+  // While a call waits for its result, look every second: the guess is due 10 seconds after it.
   const pending = [...followed.values()].some(follow => follow.turn?.pending)
   if (!moved && !force && !pending && !followTick()) return
   const now = await $.clock.now()
@@ -773,7 +773,7 @@ const EMPTY_LOG: Logged = { own: new Map(), briefs: new Map() }
  * How long a tool call may wait for its result before the panel guesses its helper is stopped on a
  * permission prompt (with no plugin in the helper's session, a prompt leaves nothing else to see).
  */
-export const PERMISSION_GUESS_MS = 30_000
+export const PERMISSION_GUESS_MS = 10_000
 const GUESS = 'May be waiting for your permission: '
 /** Tool calls that run long on their own and never count as a stalled prompt: shell commands, subagents, skills, waits. */
 export const runsLong = (name: string): boolean => /^(Bash|Agent|Task|Skill)$/.test(name) || /wait|sleep|monitor|agent|skill/i.test(name)
@@ -809,7 +809,7 @@ function cardChanges(state: McState, now: number, log: Logged): Report[] {
         { do: 'event', type: 'needs_user', from: idOf(role), to: 'orchestrator', text: question, auto: true },
         { do: 'agent', name: role, status: 'needs_user', task: question },
       )
-    } else if (turn.state === 'running' && turn.pending && !runsLong(turn.pending.name) && now - turn.pending.at > PERMISSION_GUESS_MS && (agent?.status === 'working' || agent?.status === 'needs_user')) {
+    } else if (turn.state === 'running' && turn.pending?.name && !runsLong(turn.pending.name) && now - turn.pending.at > PERMISSION_GUESS_MS && (agent?.status === 'working' || agent?.status === 'needs_user')) {
       // A call that should have its result by now: likely a permission prompt. Only over working (or
       // its own earlier guess): never over the helper's own NEEDS YOU, a question, in review or done.
       const guess = clip(`${GUESS}${turn.pending.name.replace(/^mcp__.+?__/, '')}`, 80)
