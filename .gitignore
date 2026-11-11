@@ -1,0 +1,15 @@
+.claude-plugin/types/
+.mcpb-cache/
+.DS_Store
+*.log
+__pycache__/
+node_modules/
+# Data a writer may leave if run with MC_DIR or --dir pointing here
+state.json
+state.json.bad
+events.jsonl
+.tmp-*
+.heartbeat.lock
+.panel-debug.json
+preview/
+.probe.jsonl

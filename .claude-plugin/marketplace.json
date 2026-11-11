@@ -1,0 +1,14 @@
+{
+  "name": "mission-control",
+  "description": "Mission Control: a live side pane for Claude Code that shows an orchestrating session and its helper agents",
+  "owner": {
+    "name": "Ammad Ahmed"
+  },
+  "plugins": [
+    {
+      "name": "mission-control",
+      "source": "./",
+      "description": "A live side pane that shows what an orchestrating session and its helper agents are doing"
+    }
+  ]
+}
