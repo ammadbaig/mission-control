@@ -523,24 +523,30 @@ export const registerMission: Register = on => {
     )
     /**
      * A drawing in its slot (see swap.ts): its source kept while only its delays change, so the app
-     * keeps its iframe; when it has changed, the drawing it replaces lies over it (position absolute,
-     * painted above the slot's flow child) until GHOST_MS have passed and the new one has loaded,
-     * then a redraw lifts it. Both are always one Box deep in the slot, so the morph matches them.
+     * keeps its iframe. When it has changed, only one of the two is ever shown, never both (the
+     * drawings have no background, so two on top of each other read as one double image): the one it
+     * replaces stays, alone, in the slot's flow, while the new one loads hidden (display none) beside
+     * it; after GHOST_MS a redraw drops the old one and shows the new one, already loaded, in one step:
+     * no overlap and no blank frame. Both are always one Box deep in the slot, so the morph keeps the
+     * new one's iframe when it is shown.
      */
     const draw = (piece: Piece) => {
       const { current, ghost, changed } = settle(piece.key, asShown(piece), now)
       if (changed) liftGhostsSoon($)
+      if (!ghost) {
+        return (
+          <Box flexDirection="column" overflow="hidden">
+            {[<Box flexDirection="column">{svgOf(current)}</Box>]}
+          </Box>
+        )
+      }
       return (
         <Box flexDirection="column" overflow="hidden">
           {[
-            ...(ghost
-              ? [
-                  <Box position="absolute" top={0} left={0}>
-                    {svgOf(ghost)}
-                  </Box>,
-                ]
-              : []),
-            <Box flexDirection="column">{svgOf(current)}</Box>,
+            <Box position="absolute" top={0} left={0} display="none">
+              {svgOf(current)}
+            </Box>,
+            <Box flexDirection="column">{svgOf(ghost)}</Box>,
           ]}
         </Box>
       )

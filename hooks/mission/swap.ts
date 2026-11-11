@@ -7,14 +7,14 @@
  * So: (1) a drawing whose content has not changed keeps the exact source it had, even though its
  * animation delays (computed from the time, so a reload carries a loop on where it was) would differ;
  * the app then keeps its iframe, and its animations run on undisturbed. (2) A drawing that has
- * changed is shown over its predecessor's iframe for GHOST_MS: the old one, kept by the morph,
- * lies on top until the new one beneath has loaded, and is then removed. No state here is shared
+ * changed loads hidden beside its predecessor for GHOST_MS, while the old one alone stays shown,
+ * then the old one is removed and the new one shown: never both at once. No state here is shared
  * with the drawings: they stay pure.
  */
 
 import type { Piece } from './draw'
 
-/** How long a replaced drawing stays over its successor: well past one load of a small document. */
+/** How long a replaced drawing stays shown while its successor loads hidden: well past one load of a small document. */
 export const GHOST_MS = 400
 
 /** What one drawing shows: its source, its alt and its size. */

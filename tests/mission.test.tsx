@@ -1571,3 +1571,39 @@ test('after /mission, and after each of three resizes, the very next draw is the
   }
   await ui.unmount()
 })
+
+test('a status change never shows two drawings of the same piece at once: the old one alone, then the new one alone', async ($, on) => {
+  const { clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Switch' }, { do: 'agent', name: 'Tester', status: 'working', task: 'Checking' }] } as never)
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  type El = { type: string; props: Record<string, unknown>; children: unknown[] }
+  // The drawings a draw shows: every Svg not inside a Box with display none.
+  const shownAlts = async () => {
+    const roots = await ui.findAll({ type: 'Box' })
+    const hidden = new Set<string>()
+    const walk = (el: El, under: boolean) => {
+      const hide = under || (el.type === 'Box' && el.props.display === 'none')
+      if (el.type === 'Svg' && hide) hidden.add(String(el.props.source))
+      for (const child of el.children ?? []) if (child && typeof child === 'object' && 'type' in child) walk(child as El, hide)
+    }
+    for (const root of roots) walk(root as unknown as El, false)
+    return (await ui.findAll({ type: 'Svg' })).filter(found => !hidden.has(String(found.props.source))).map(found => String(found.props.alt))
+  }
+  const agentsShown = async () => (await shownAlts()).filter(alt => alt.startsWith('Agents.'))
+  expect(await agentsShown()).toHaveLength(1)
+  for (const status of ['needs_user', 'working', 'in_review', 'done']) {
+    await $.tool.call({ tool: TOOL, updates: [{ do: 'agent', name: 'Tester', status, task: `Now ${status}` }] } as never)
+    // Every draw through the change: right after it, mid-way, and once the old one is gone.
+    for (const step of [10, 200, 300]) {
+      await clock.advance(step)
+      await ui.redraw()
+      const shown = await agentsShown()
+      expect(shown).toHaveLength(1)
+    }
+    // Once done, the one shown is the new one.
+    expect((await agentsShown())[0]).toContain(`Tester: ${status.replace('_', ' ')}`)
+  }
+  await ui.unmount()
+})

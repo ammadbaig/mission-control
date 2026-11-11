@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4
+
+- A changed drawing (an agent card switching status, say) no longer shows on top of the old one: the old one stays alone while the new one loads hidden, then the new one alone.
+
 ## 1.0.3
 
 1.0.2 was never published; its changes are here too.
