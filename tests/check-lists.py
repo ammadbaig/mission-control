@@ -1,7 +1,7 @@
 """The lists the package names in several places, checked against one source: the plugin's writer.
 
 Run: python3 tests/check-lists.py. It fails when the CLI accepts a different list from the plugin,
-or when the README, the skill or the contract leaves out an event type, a status or an update kind.
+or when the guide (docs/guide.md, the full text the short README points to), the skill or the contract leaves out an event type, a status or an update kind.
 """
 import pathlib
 import re
@@ -11,7 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 writer = (ROOT / "hooks/mission/writer.ts").read_text(encoding="utf-8")
 model = (ROOT / "hooks/mission/model.ts").read_text(encoding="utf-8")
 cli = (ROOT / "cli/mc.py").read_text(encoding="utf-8")
-docs = {name: (ROOT / name).read_text(encoding="utf-8") for name in ("README.md", "skills/mission-control/SKILL.md", "hooks/mission/contract.ts")}
+docs = {name: (ROOT / name).read_text(encoding="utf-8") for name in ("docs/guide.md", "skills/mission-control/SKILL.md", "hooks/mission/contract.ts")}
 
 
 def ts_list(source, name):

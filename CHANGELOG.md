@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6
+
+- The orchestrator's status in the circle is always right. `task.start`, `task.done` and `task.fail` start it over (IDLE, or DONE after `task.done`), so a PLANNING set during a solo task no longer stays on the finished task.
+- A new status, `working`, for the orchestrator's own work. The plugin opens the orchestrator's turn at its prompt or first tool call and closes it when it stops: the circle reads WORKING while that turn runs, task or no task, and `planning`, `dispatching` and `working` are dropped when it ends. The order: NEEDS YOU, REVIEWING, its turn (DONE, or its own PLANNING or BRIEFING, else WORKING), WAITING, DONE, IDLE. Only in the orchestrator's session; a helper's never writes it. `orch working` (and `mc.py orch working`) is accepted too.
+- The orchestrator's circle is larger (disc radius 22 to 32 px, the dashed ring 30 to 43.6 px and its glow with them, same centre; on a graph too short for that, the whole circle shrinks just enough to keep 12 px from the card's edges and every agent's node and label; the agents' links still end at its edge), and its words always fit inside it with 8 px on each side: IDLE, PLANNING, BRIEFING (dispatching), WORKING, WAITING, REVIEWING, NEEDS YOU, DONE. The status ids are unchanged.
+- The orchestrator's dashed ring always turns, in every status; it used to stop whenever the pane was not live (a paused task, or a quiet minute, as while the orchestrator waits on you). Reduced motion still stops it.
+- When the orchestrator needs you, its circle (disc, dashed ring, fill tint and status word) takes the same Needs you colour as a needs-you agent card, in both themes; in every other status it keeps its purple.
+- Activity view: each sender's dot and name take its own colour (the person, the orchestrator's purple, teal Explorer, blue Worker, lime Tester, coral Security, grey for any other), each at least 4.5:1 in both themes, an older event's dot dimmed; the list starts closer under the task's bar, at the Overview's 12 px section spacing. The large empty band above the list is gone: the app was shrinking the tall list drawing slightly to fit its frame and centring it, which left about 70 px above it; both Activity drawings now sit at the top of their frame.
+- `tests/check-lists.py` checks the full guide (`docs/guide.md`) in place of the short README.
+
 ## 1.0.5
 
 - The `/mission size` command is gone; `/mission measure` still measures the row height and keeps it in `.panel.json`.

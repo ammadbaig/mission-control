@@ -4,7 +4,7 @@
  * either can write the files the pane reads. No `$` here.
  */
 
-import type { AgentStatus, EventType, McAgent, McEvent, McState, McStep, OrchStatus, StepStatus } from './model'
+import { ORCH_TURN_ONLY, type AgentStatus, type EventType, type McAgent, type McEvent, type McState, type McStep, type OrchStatus, type StepStatus } from './model'
 
 export const TITLE_MAX = 80
 export const TASK_MAX = 80
@@ -23,7 +23,7 @@ export const LOG_KEEP_LINES = 500
 
 export const STEP_STATUSES: StepStatus[] = ['pending', 'active', 'done', 'skipped']
 export const AGENT_STATUSES: AgentStatus[] = ['idle', 'queued', 'working', 'in_review', 'done', 'needs_user']
-export const ORCH_STATUSES: OrchStatus[] = ['idle', 'planning', 'dispatching', 'waiting', 'reviewing', 'needs_user', 'done']
+export const ORCH_STATUSES: OrchStatus[] = ['idle', 'planning', 'dispatching', 'working', 'waiting', 'reviewing', 'needs_user', 'done']
 export const EVENT_TYPES: EventType[] = [
   'dispatch',
   'report',
@@ -187,6 +187,15 @@ const restAgents = (state: McState, now: number): void => {
   }
 }
 
+/**
+ * A task starts or ends: the orchestrator's own status starts over too (IDLE, or DONE after
+ * task.done), so nothing it set under one task stays in the circle after it. Its turn is kept.
+ */
+const restOrchestrator = (state: McState, status: 'idle' | 'done', now: number): void => {
+  const turn = state.orchestrator.turn
+  state.orchestrator = { status, waitingOn: [], reviewing: [], since: now, ...(turn === undefined ? {} : { turn }) }
+}
+
 /** An agent's state now belongs to the current task (or to none, when there is none). */
 const ownTask = (state: McState, agent: McAgent): void => {
   if (state.task) agent.taskId = state.task.id
@@ -208,6 +217,7 @@ export function apply(current: McState, report: Report, now: number, id: () => s
       if (!report.title) return { error: 'task.start needs a title' }
       state.task = { id: id(), title: clip(report.title, TITLE_MAX), status: 'running', startedAt: now }
       restAgents(state, now)
+      restOrchestrator(state, 'idle', now)
       break
     }
     case 'task.done':
@@ -219,6 +229,7 @@ export function apply(current: McState, report: Report, now: number, id: () => s
         for (const step of state.plan) if (step.status === 'active' || step.status === 'pending') step.status = 'done'
       }
       restAgents(state, now)
+      restOrchestrator(state, kind === 'task.done' ? 'done' : 'idle', now)
       break
     }
     case 'task.pause': {
@@ -290,6 +301,7 @@ export function apply(current: McState, report: Report, now: number, id: () => s
       state.task = { id: item.id, title: clip(item.text, TITLE_MAX), status: 'running', startedAt: now }
       state.plan = null
       restAgents(state, now)
+      restOrchestrator(state, 'idle', now)
       break
     }
     case 'agent': {
@@ -320,6 +332,7 @@ export function apply(current: McState, report: Report, now: number, id: () => s
         waitingOn: names(report.waitingOn),
         reviewing: report.status === 'reviewing' ? names(report.reviewing) : [],
         since: now,
+        ...(state.orchestrator.turn === undefined ? {} : { turn: state.orchestrator.turn }),
       }
       break
     }
@@ -387,6 +400,26 @@ export function apply(current: McState, report: Report, now: number, id: () => s
   }
   state.lastUpdated = now
   return { state }
+}
+
+/**
+ * The orchestrator's own turn begins (`open`) or ends: written by the plugin in the orchestrator's
+ * session only, never through `report`. While it runs the circle shows WORKING (model.ts
+ * `orchestratorOf`). A new turn drops a DONE from an earlier one; the end drops PLANNING,
+ * DISPATCHING and WORKING, which last only for their turn.
+ */
+export function turnState(current: McState, open: boolean, now: number): McState {
+  const state: McState = structuredClone(current)
+  const orch = state.orchestrator
+  if (open) {
+    orch.turn = now
+    if (orch.status === 'done') Object.assign(orch, { status: 'idle', since: now })
+  } else {
+    delete orch.turn
+    if (ORCH_TURN_ONLY.has(orch.status)) Object.assign(orch, { status: 'idle', since: now })
+  }
+  state.lastUpdated = now
+  return state
 }
 
 /** The log with `lines` added, rotated past LOG_ROTATE_BYTES to its newest LOG_KEEP_LINES lines. */

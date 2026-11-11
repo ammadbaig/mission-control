@@ -8,7 +8,7 @@ import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, parseState, readNewLine
 import { GHOST_MS, settle, shown as asShown, type Shown } from './swap'
 import { activityLines, overviewLines, type Line, type Tone } from './term'
 import { TOKENS } from './tokens'
-import { autoCommand, loadAuto, markOrchestrating, notePanel, startWatch, watchCall } from './auto'
+import { autoCommand, loadAuto, markOrchestrating, notePanel, openTurn, startWatch, watchCall } from './auto'
 import { pathsOf, report, say, serially, whenWritten } from './io'
 import { MAX_UPDATES, stateText, type Report } from './writer'
 
@@ -344,6 +344,8 @@ async function answerReport($: EngineInterface, updates: unknown, as: unknown): 
   }
   // The orchestrator's own writes mark this session as the one the turn-end guard watches.
   if (!helper) await markOrchestrating($).catch(() => undefined)
+  // Its turn is open before this report applies, so a task.done in it shows DONE, not WORKING.
+  if (!helper) await openTurn($).catch(() => undefined)
   const { applied, error, notes } = helper ? await say($, as, valid) : await report($, valid)
   const also = notes.length > 0 ? ` Note: ${notes.join('; ')}.` : ''
   if (error !== undefined) {

@@ -6,7 +6,7 @@ export type MissionTheme = 'auto' | 'light' | 'dark'
 export type TaskStatus = 'idle' | 'running' | 'paused' | 'done' | 'failed'
 export type StepStatus = 'pending' | 'active' | 'done' | 'skipped'
 export type AgentStatus = 'idle' | 'queued' | 'working' | 'in_review' | 'done' | 'needs_user'
-export type OrchStatus = 'idle' | 'planning' | 'dispatching' | 'waiting' | 'reviewing' | 'needs_user' | 'done'
+export type OrchStatus = 'idle' | 'planning' | 'dispatching' | 'working' | 'waiting' | 'reviewing' | 'needs_user' | 'done'
 export type EventType =
   | 'dispatch'
   | 'report'
@@ -43,7 +43,8 @@ export type McState = {
   queue: McQueueItem[]
   agents: McAgent[]
   /** `reviewing`: the agents whose reports it is reading, while its status is reviewing. */
-  orchestrator: { status: OrchStatus; waitingOn: string[]; reviewing: string[]; since?: number }
+  /** `since`: when it last set its own status. `turn`: when its own turn began, while it runs (the plugin, in its own session). */
+  orchestrator: { status: OrchStatus; waitingOn: string[]; reviewing: string[]; since?: number; turn?: number }
   lastUpdated: number
 }
 export type McEvent = {

@@ -7,7 +7,7 @@
   mc.py plan clear                    mc.py queue add --text "..."    mc.py queue promote
   mc.py queue clear | queue remove <number from 1>
   mc.py agent <name> <status> --task "..."     (status: idle|queued|working|in_review|done|needs_user)
-  mc.py orch <planning|dispatching|needs_user>  (the rest, and whom it waits on, follow its agents)
+  mc.py orch <planning|dispatching|working|needs_user>  (the rest, and whom it waits on, follow its agents)
   mc.py event <type> --from X --to Y --text "..."
   mc.py heartbeat                     mc.py heartbeat-loop
   mc.py say --as <role> "..." [--report]       (a helper's own line; it moves only its own card)
@@ -72,9 +72,9 @@ HEARTBEAT_SECONDS = 20
 TASK_STATUSES = ("idle", "running", "paused", "done", "failed")
 STEP_STATUSES = ("pending", "active", "done", "skipped")
 AGENT_STATUSES = ("idle", "queued", "working", "in_review", "done", "needs_user")
-ORCH_STATUSES = ("idle", "planning", "dispatching", "waiting", "reviewing", "needs_user", "done")
-# The statuses the orchestrator sets itself; every other one is derived from its agents.
-ORCH_OWN = ("planning", "dispatching", "needs_user")
+ORCH_STATUSES = ("idle", "planning", "dispatching", "working", "waiting", "reviewing", "needs_user", "done")
+# The statuses the orchestrator sets itself; every other one is derived from its agents and its turn.
+ORCH_OWN = ("planning", "dispatching", "working", "needs_user")
 # The updates of one call are timed apart: an agent's change within this is not "after".
 SAME_CALL_MS = 64
 EVENT_TYPES = (
@@ -173,6 +173,8 @@ def normalize(data):
         "queue": queue,
         "agents": agents,
         "orchestrator": {**({"since": orch["since"]} if _num(orch.get("since"), None) is not None else {}),
+                         # While its own turn runs (the plugin, in the orchestrator's session): when it began.
+                         **({"turn": orch["turn"]} if _num(orch.get("turn"), None) is not None else {}),
                          "status": _one_of(orch.get("status"), ORCH_STATUSES, "idle"),
                          "waitingOn": [name for name in waiting if isinstance(name, str)],
                          "reviewing": [name for name in reviewing if isinstance(name, str)]},
@@ -248,30 +250,50 @@ def replace(temp, path):
 
 
 def orchestrator_of(state):
-    """The orchestrator as its agents show it: the same rule as the plugin (model.ts orchestratorOf).
+    """The orchestrator as its agents and its turn show it: the same rule as the plugin (model.ts
+    orchestratorOf).
 
-    Whom it waits on is the agents working, whom it reviews the agents in review. Its status: its
-    own planning, dispatching or needs_user while no agent's state has changed since it set it; else
-    reviewing while any agent is in review, waiting while any works, done for a finished task, else
-    idle (or what it set, while a task runs and no agent is busy)."""
+    Whom it waits on is the agents working, whom it reviews the agents in review. Its status, in
+    this order: needs_user while what it set stands (no agent's state changed since); reviewing while
+    any agent is in review; while its own turn runs (`turn`, written by the plugin only), done if it
+    finished the task in this turn, planning or dispatching if it set one in this turn and it stands,
+    else working; outside a turn, what it set while that stands; waiting while any agent works; done
+    for a finished task, else idle (or what it set, while a task runs)."""
     orch = state.get("orchestrator") or {"status": "idle"}
     agents = state.get("agents") or []
     reviewing = [a["name"] for a in agents if a.get("status") == "in_review"]
     waiting_on = [a["name"] for a in agents if a.get("status") == "working"]
     last_change = max([0] + [a.get("startedAt") or 0 for a in agents])
     since = {"since": orch["since"]} if isinstance(orch.get("since"), (int, float)) else {}
+    turn = orch.get("turn") if isinstance(orch.get("turn"), (int, float)) else None
     status = orch.get("status", "idle")
-    if status in ORCH_OWN and since and since["since"] + SAME_CALL_MS >= last_change:
+    stands = status in ORCH_OWN and since and since["since"] + SAME_CALL_MS >= last_change
+    this_turn = turn is not None and since and since["since"] >= turn
+    if status == "needs_user" and stands:
         pass
     elif reviewing:
         status = "reviewing"
+    elif turn is not None:
+        if not ((status == "done" and this_turn) or (status in ("planning", "dispatching") and stands and this_turn)):
+            status = "working"
+    elif stands:
+        pass
     elif waiting_on:
         status = "waiting"
     elif not (state.get("task") or {}).get("status") in ("running", "paused"):
         status = "done" if status == "done" else "idle"
     elif status in ("waiting", "reviewing"):
         status = "idle"
-    return {"status": status, "waitingOn": waiting_on, "reviewing": reviewing, **since}
+    return {"status": status, "waitingOn": waiting_on, "reviewing": reviewing, **since,
+            **({"turn": turn} if turn is not None else {})}
+
+
+def rest_orchestrator(state, status):
+    """A task starts or ends: the orchestrator's own status starts over too (idle, or done after task
+    done), so nothing it set under one task stays in the circle after it. Its turn is kept."""
+    turn = (state.get("orchestrator") or {}).get("turn")
+    state["orchestrator"] = {"status": status, "waitingOn": [], "reviewing": [], "since": now_ms(),
+                             **({"turn": turn} if isinstance(turn, (int, float)) else {})}
 
 
 def save(state):
@@ -420,6 +442,7 @@ def cmd_task(args):
         state["task"] = {"id": uuid.uuid4().hex[:8], "title": clip(args.title, TITLE_MAX),
                          "status": "running", "startedAt": now_ms()}
         rest_agents(state)
+        rest_orchestrator(state, "idle")
     elif args.action == "pause":
         if not state["task"] or state["task"]["status"] != "running":
             sys.exit("only a running task can be paused")
@@ -447,6 +470,7 @@ def cmd_task(args):
                 if step["status"] in ("active", "pending"):
                     step["status"] = "done"
         rest_agents(state)
+        rest_orchestrator(state, "done" if args.action == "done" else "idle")
     save(state)
 
 
@@ -509,6 +533,7 @@ def cmd_queue(args):
                          "startedAt": now_ms()}
         state["plan"] = None
         rest_agents(state)
+        rest_orchestrator(state, "idle")
     save(state)
 
 
@@ -543,7 +568,9 @@ def cmd_orch(args):
     state = load()
     # Whom it waits on and reviews come from the agents (orchestrator_of, in save); --waiting-on and
     # --reviewing are still accepted from older scripts, and ignored.
-    state["orchestrator"] = {"status": args.status, "waitingOn": [], "reviewing": [], "since": now_ms()}
+    turn = state["orchestrator"].get("turn")
+    state["orchestrator"] = {"status": args.status, "waitingOn": [], "reviewing": [], "since": now_ms(),
+                             **({"turn": turn} if isinstance(turn, (int, float)) else {})}
     save(state)
 
 

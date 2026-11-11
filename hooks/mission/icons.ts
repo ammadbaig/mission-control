@@ -109,15 +109,30 @@ export const avatar = (T: Tokens, name: string, look: Look, x: number, y: number
   return `<g transform="translate(${x} ${y})"${glow}>${disc(T, look, motion)}${glyph ? glyph(glyphColor(T, look)) : ''}</g>`
 }
 
-/** Node / Orchestrator (p1-5a06c): the dashed ring r 30 and the disc r 22, centred at (cx, cy). */
-export const orchestratorNode = (T: Tokens, cx: number, cy: number, ringClass: string, ringStyle: string): string => {
+/**
+ * The orchestrator's circle, drawn larger than the design's (disc r 22, ring r 30) so its two lines
+ * of text have room: disc r 32, ring r 43.6 (30 x 32/22). Strokes keep their widths; the ring and
+ * the glow keep the design's proportions to the disc (a short graph shrinks all three: draw.ts orchCircleFor).
+ */
+export const ORCH_DISC_R = 32
+/** The dashed ring's radius for a disc of radius `disc`. */
+export const orchRingOf = (disc: number): number => (disc * 30) / 22
+export const ORCH_RING_R = orchRingOf(ORCH_DISC_R)
+
+/**
+ * Node / Orchestrator (p1-5a06c): the dashed ring and the disc of radius `disc`, centred at (cx, cy).
+ * In its own purple; in the needs-you colour and tint, as a needs-you card, when `needs`.
+ */
+export const orchestratorNode = (T: Tokens, cx: number, cy: number, ringClass: string, ringStyle: string, needs = false, disc = ORCH_DISC_R): string => {
+  const [color, fill] = needs ? [T.needs, T.needsFill] : [T.orch, T.orchFill]
+  const scale = disc / 22
   const ring =
     'M76.6151 45.846C76.6217 46.1049 76.625 46.3646 76.625 46.625C76.625 46.8854 76.6217 47.1451 76.6151 47.404M76.0414 40.7068C75.9394 40.1972 75.8245 39.6921 75.6971 39.1921M73.9886 34.3093C73.7754 33.8363 73.5502 33.3697 73.3136 32.9102M70.5579 28.5331C70.2451 28.12 69.9218 27.7152 69.5885 27.3191M65.9309 23.6615C65.5348 23.3282 65.13 23.0049 64.7169 22.6921M60.3399 19.9364C59.8803 19.6998 59.4138 19.4746 58.9407 19.2614M54.0579 17.5529C53.5579 17.4255 53.0528 17.3106 52.5432 17.2086M47.404 16.6349C47.1451 16.6283 46.8854 16.625 46.625 16.625C46.3646 16.625 46.1049 16.6283 45.846 16.6349M40.7068 17.2086C40.1972 17.3106 39.6921 17.4255 39.1921 17.5529M34.3093 19.2614C33.8363 19.4746 33.3697 19.6998 32.9102 19.9364M28.5331 22.6921C28.12 23.0049 27.7152 23.3282 27.3191 23.6615M23.6615 27.3191C23.3282 27.7152 23.0049 28.12 22.6921 28.5331M19.9364 32.9101C19.6998 33.3697 19.4746 33.8362 19.2614 34.3093M17.5529 39.1921C17.4255 39.6921 17.3106 40.1972 17.2086 40.7068M16.6349 45.846C16.6283 46.1049 16.625 46.3646 16.625 46.625C16.625 46.8854 16.6283 47.1451 16.6349 47.404M17.2086 52.5432C17.3106 53.0528 17.4255 53.5579 17.5529 54.0579M19.2614 58.9407C19.4746 59.4137 19.6998 59.8803 19.9364 60.3398M22.6921 64.7169C23.0049 65.13 23.3282 65.5348 23.6615 65.9309M27.3191 69.5885C27.7152 69.9218 28.12 70.2451 28.5331 70.5579M32.9101 73.3136C33.3697 73.5502 33.8362 73.7754 34.3093 73.9886M39.1921 75.6971C39.6921 75.8245 40.1972 75.9394 40.7068 76.0414M45.846 76.6151C46.1049 76.6217 46.3646 76.625 46.625 76.625C46.8854 76.625 47.1451 76.6217 47.404 76.6151M52.5432 76.0414C53.0528 75.9394 53.5579 75.8245 54.0579 75.6971M58.9407 73.9886C59.4137 73.7754 59.8803 73.5502 60.3398 73.3136M64.7169 70.5579C65.13 70.2451 65.5348 69.9218 65.9309 69.5885M69.5885 65.9309C69.9218 65.5348 70.2451 65.13 70.5579 64.7169M73.3136 60.3399C73.5502 59.8803 73.7754 59.4138 73.9886 58.9407M75.6971 54.0579C75.8245 53.5579 75.9394 53.0528 76.0414 52.5432'
-  const shift = `translate(${cx - 46.625} ${cy - 46.625})`
+  const shift = `translate(${cx} ${cy}) scale(${scale}) translate(-46.625 -46.625)`
   return (
-    `<g transform="${shift}" style="filter:drop-shadow(0 0 8px ${alpha(T.orch, T.glowOrch)})">` +
-    `<g class="${ringClass}" style="${ringStyle}"><path d="${ring}" stroke-width="1.25" stroke-linecap="round" stroke="${T.orch}" stroke-opacity="0.55" fill="none"/></g>` +
-    `<path d="M46.625 68.625C58.7753 68.625 68.625 58.7753 68.625 46.625C68.625 34.4747 58.7753 24.625 46.625 24.625C34.4747 24.625 24.625 34.4747 24.625 46.625C24.625 58.7753 34.4747 68.625 46.625 68.625Z" fill="${T.orchFill}" stroke-width="1.5" stroke="${T.orch}"/>` +
+    `<g transform="${shift}" style="filter:drop-shadow(0 0 ${Math.round(8 * scale * 10) / 10}px ${alpha(color, T.glowOrch)})">` +
+    `<g class="${ringClass}" style="${ringStyle}"><path d="${ring}" vector-effect="non-scaling-stroke" stroke-width="1.25" stroke-linecap="round" stroke="${color}" stroke-opacity="0.55" fill="none"/></g>` +
+    `<path d="M46.625 68.625C58.7753 68.625 68.625 58.7753 68.625 46.625C68.625 34.4747 58.7753 24.625 46.625 24.625C34.4747 24.625 24.625 34.4747 24.625 46.625C24.625 58.7753 34.4747 68.625 46.625 68.625Z" fill="${fill}" vector-effect="non-scaling-stroke" stroke-width="1.5" stroke="${color}"/>` +
     `</g>`
   )
 }

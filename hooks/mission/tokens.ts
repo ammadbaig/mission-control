@@ -54,7 +54,12 @@ export type Tokens = {
   needsFill: string
   reviewFill: string
   orchFill: string
-  idleDot: string
+  /**
+   * Who an event is from, in the Activity view (its dot and name): the person, the orchestrator (its
+   * circle's purple), each helper role, and any other agent (neutral). Each at least 4.5:1 on the
+   * pane's background, none the exact Needs you, In review or Done token.
+   */
+  actor: Record<Actor, string>
   track: string
   skipLine: string
   /** Glow strengths (alpha), softer in light. */
@@ -71,6 +76,9 @@ export type Tokens = {
 }
 
 /** RGB of a hex colour, for the alphas below. */
+/** The senders the Activity view tells apart by colour. */
+export type Actor = 'user' | 'orchestrator' | 'explorer' | 'worker' | 'tester' | 'security' | 'other'
+
 const rgb = (hex: string): string => {
   const n = Number.parseInt(hex.slice(1), 16)
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`
@@ -102,7 +110,8 @@ export const DARK: Tokens = {
   needsFill: a(darkStatus.needs, 0.12),
   reviewFill: a(darkStatus.review, 0.12),
   orchFill: a(darkStatus.orch, 0.12),
-  idleDot: '#2B354A',
+  // On the app's dark background (#262624): 15.16, 5.51, 8.14, 6.29, 10.05, 6.80, 5.75.
+  actor: { user: '#FFFFFF', orchestrator: darkStatus.orch, explorer: '#2DD4BF', worker: '#6EA8FF', tester: '#A3E635', security: '#FF8F70', other: '#93A0B8' },
   track: 'rgba(255,255,255,0.10)',
   skipLine: 'rgba(255,255,255,0.30)',
   glowNow: 0.6,
@@ -145,7 +154,8 @@ export const LIGHT: Tokens = {
   needsFill: a(lightStatus.needs, 0.12),
   reviewFill: a(lightStatus.review, 0.12),
   orchFill: a(lightStatus.orch, 0.12),
-  idleDot: 'rgba(0,0,0,0.16)',
+  // On #FAF9F5: 16.86, 5.00, 5.20, 5.52, 4.74, 4.92, 7.12.
+  actor: { user: '#141821', orchestrator: lightStatus.orch, explorer: '#0F766E', worker: '#1D5FD1', tester: '#4D7C0F', security: '#C2410C', other: '#4B5568' },
   track: 'rgba(0,0,0,0.10)',
   skipLine: 'rgba(0,0,0,0.30)',
   glowNow: 0.3,

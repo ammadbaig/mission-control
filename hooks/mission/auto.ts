@@ -20,7 +20,7 @@
 
 import type { EngineInterface, On } from 'claude-code'
 
-import { afterWrite, pathsOf, readIfThere, report } from './io'
+import { afterWrite, pathsOf, readIfThere, report, writeTurn } from './io'
 import { parseState, type McState } from './model'
 import { projectFolderOf, turnOf, type Turn } from './transcript'
 import { clip, type Report } from './writer'
@@ -466,13 +466,17 @@ async function incoming($: EngineInterface, kind: string, text: string): Promise
  */
 export async function watchCall<E extends { tool: unknown }, R>($: EngineInterface, e: E, next: (e: E) => Promise<R>): Promise<R> {
   const tool = String(e.tool)
-  if (!BRIEF_TOOLS.has(tool)) return watchOwnCall($, tool, () => next(e))
+  if (!BRIEF_TOOLS.has(tool)) {
+    await openTurn($).catch(() => undefined)
+    return watchOwnCall($, tool, () => next(e))
+  }
   const input = e as unknown as Record<string, unknown>
   const brief = briefOf(tool, input)
   const at = await $.clock.now()
   briefed = true
   helperRole = null
   void markOrchestrating($).catch(() => undefined)
+  await openTurn($).catch(() => undefined)
   const role = brief ? roleFor(brief.key) : null
   void trace($, { call: tool, keys: Object.keys(input).filter(key => key !== 'tool').sort(), to: typeof input.to === 'string' ? input.to : undefined, role, automatic: enabled }).catch(() => undefined)
   if (enabled && role && brief) void dispatch($, role, brief.text, at).catch(() => undefined)
@@ -503,6 +507,7 @@ export function registerAuto(on: On): void {
   }).catch((_$, e, next) => next(e))
   on('prompt.submit', async ($, e, next) => {
     void incoming($, `submit:${e.origin.kind}`, e.text).catch(() => undefined)
+    await openTurn($).catch(() => undefined)
     return next(e)
   }).catch((_$, e, next) => next(e))
 
@@ -512,8 +517,13 @@ export function registerAuto(on: On): void {
   on('classic.Stop', async ($, e, next) => {
     settleOwn($)
     const answer = await next(e)
-    if (!orchestrating || helperRole || e.stop_hook_active) return answer
+    if (!orchestrating || helperRole || e.stop_hook_active) {
+      await closeTurn($).catch(() => undefined)
+      return answer
+    }
     const reminder = await owed($).catch(() => null)
+    // Blocked, the turn goes on; else it ends here.
+    if (!reminder) await closeTurn($).catch(() => undefined)
     return reminder ? { ...answer, block: reminder } : answer
   }).catch((_$, e, next) => next(e))
 
@@ -554,6 +564,24 @@ export async function markOrchestrating($: EngineInterface): Promise<void> {
   const known = await $.store.get(STORE_ORCH).catch(() => undefined)
   const ids = Array.isArray(known) ? known.filter((each): each is string => typeof each === 'string').slice(-20) : []
   if (!ids.includes(id)) await $.store.set(STORE_ORCH, [...ids, id])
+}
+
+/**
+ * The orchestrator's own turn: opened at its prompt or its first tool call, closed when it stops. The
+ * circle says WORKING while it runs, task or no task (writer.ts `turnState`). Only in the session that
+ * orchestrates, never in a helper's, and not while automatic reporting is off.
+ */
+let turnOpen = false
+export async function openTurn($: EngineInterface): Promise<void> {
+  if (turnOpen || !enabled || helperRole || !orchestrating) return
+  turnOpen = true
+  await writeTurn($, true)
+}
+/** Also after a reload in the middle of a turn (which forgets `turnOpen`): the stored turn is what ends. */
+async function closeTurn($: EngineInterface): Promise<void> {
+  turnOpen = false
+  if (!orchestrating || helperRole) return
+  await writeTurn($, false)
 }
 
 /** Reminders already given, one per agent per hand-in (its name and when its status changed). */

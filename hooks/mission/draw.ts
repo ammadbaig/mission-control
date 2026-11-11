@@ -1,7 +1,7 @@
-import { avatar, chevronRight, dot, liveBars, orbit, orchestratorNode, type Look } from './icons'
-import { isOffline, isStale, orchestratorOf, REVIEW_STALE_MS, type McAgent, type McEvent, type McState, type McStep, type MissionData } from './model'
+import { avatar, chevronRight, dot, liveBars, orbit, ORCH_DISC_R, orchestratorNode, orchRingOf, type Look } from './icons'
+import { isOffline, isStale, ORCH_LABELS, orchestratorOf, REVIEW_STALE_MS, type McAgent, type McEvent, type McState, type McStep, type MissionData } from './model'
 import { baseline, clock, duration, fit, text, timeOfDay, widthOf, wrap } from './text'
-import { alpha, TOKENS, W, type ThemeMode, type Tokens } from './tokens'
+import { alpha, TOKENS, W, type Actor, type ThemeMode, type Tokens } from './tokens'
 
 /**
  * Mission Control's drawings, as pure functions: data, the time and the theme in, SVG documents
@@ -85,18 +85,26 @@ const STYLE = [
  * One document: `paint` draws it with one token set. `auto` draws it twice, a group per theme, and
  * the CSS above shows the one that matches the frame's colour scheme.
  */
+/**
+ * A drawing the app shows in a frame narrower than its width is shrunk to fit and, by default,
+ * centred: a tall one (the Activity list, thousands of px) then gets a band above it of half the
+ * height it lost (at 95%, about 70px over the list). `top` pins the picture to the frame's top, so
+ * any band falls below it.
+ */
 const doc = (
   theme: ThemeMode,
   width: number,
   height: number,
   paint: (T: Tokens) => { body: string; style?: string },
+  top = false,
 ): string => {
   const sets = theme === 'auto' ? [TOKENS.dark, TOKENS.light] : [TOKENS[theme]]
   const painted = sets.map(T => ({ T, ...paint(T) }))
   const body =
     theme === 'auto' ? painted.map(({ T, body: part }) => `<g class="th-${T.name}">${part}</g>`).join('') : (painted[0]?.body ?? '')
   const style = painted.map(({ style: extra }) => extra ?? '').join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none"><style>${STYLE}${style}</style>${body}</svg>`
+  const pinned = top ? ' preserveAspectRatio="xMidYMin meet"' : ''
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"${pinned} fill="none"><style>${STYLE}${style}</style>${body}</svg>`
 }
 
 /** The time the timers show: now while live; when it went quiet (offline) or was paused. */
@@ -211,12 +219,12 @@ const pillBody = (ctx: Ctx, right: number, cy: number): string => {
   )
 }
 
-/** Above the task card: the space the section's 12px top padding gives. */
-const HEADER_GAP = 12
+/** The Overview's space between sections (above the task card); the Activity view keeps the same rhythm. */
+export const SECTION_GAP = 12
 
 /** Overview header, 48 tall, and the 12px above the card: orbit, title, the pill. */
 export const header = (data: MissionData, now: number, theme: ThemeMode): Piece => {
-  const height = 48 + HEADER_GAP
+  const height = 48 + SECTION_GAP
   const svg = doc(theme, W, height, T => {
     const ctx = ctxFor(data, now, 'hd', T)
     const titleWidth = widthOf('Mission Control', 13) - 6
@@ -628,6 +636,32 @@ const seatsFor = (g: number): [number, number][] => [
   [311, g - 43],
 ]
 const orchFor = (g: number): [number, number] => [187, Math.round(g / 2) + 3]
+/** An agent's name under its node: at most this wide, its 12px line box from 16 down (top row) or G - 22 (bottom row). */
+const NODE_LABEL_MAX = 90
+const nodeLabelTop = (g: number, index: number): number => (index < 2 ? 16 : g - 22)
+
+/** The room the orchestrator's ring keeps from the graph card's top and bottom and from every agent's node and label. */
+export const ORCH_CLEAR = 12
+/**
+ * The orchestrator's circle for a graph `g` tall: the disc at ORCH_DISC_R, unless the ring would come
+ * within ORCH_CLEAR of the card's top or bottom, an agent's node or its label; then the whole circle
+ * (disc, ring, glow) shrinks just enough. With each gap, for checks.
+ */
+export const orchCircleFor = (g: number): { disc: number; ring: number; gaps: { top: number; bottom: number; nodes: number; labels: number } } => {
+  const [cx, cy] = orchFor(g)
+  const seats = seatsFor(g)
+  const nodes = Math.min(...seats.map(([x, y]) => Math.hypot(x - cx, y - cy) - 14))
+  const labels = Math.min(
+    ...seats.map(([x], index) => {
+      const top = nodeLabelTop(g, index)
+      return Math.hypot(Math.max(x - NODE_LABEL_MAX / 2 - cx, 0, cx - x - NODE_LABEL_MAX / 2), Math.max(top - cy, 0, cy - top - 12))
+    }),
+  )
+  const largest = Math.min(cy, g - cy, nodes, labels) - ORCH_CLEAR
+  const disc = Math.min(ORCH_DISC_R, (largest * 22) / 30)
+  const ring = orchRingOf(disc)
+  return { disc, ring, gaps: { top: cy - ring, bottom: g - cy - ring, nodes: nodes - ring, labels: labels - ring } }
+}
 
 /** The agents area's sizes: the graph's height and each card's (the design: 140 and 104). */
 export type AgentsSize = { graph: number; card: number }
@@ -808,7 +842,7 @@ const packets = (
       ring(to, T.working, 14)
     } else if (event.type === 'report' && from) {
       leg(from, orch, T.working)
-      ring(orch, T.orch, 22)
+      ring(orch, T.orch, orchCircleFor(graphH).disc)
     } else if (event.type === 'handoff' && from && to) {
       leg(from, orch, T.working)
       leg(orch, to, T.orch)
@@ -921,21 +955,25 @@ const card = (ctx: Ctx, slot: Slot, look: Look, x: number, y: number, h: number,
 }
 
 /**
- * The orchestrator's status under "ORCH": inside the 44px disc where it fits (36px of
- * room at its line), at 7px with the design's 0.7 tracking, else 7px untracked, else 6.5px untracked;
- * never smaller and never clipped. A word wider than that (DISPATCHING: 43px even at 6.5) goes on
- * a line under the dashed ring, at the design's 7px.
+ * The orchestrator's status under "ORCH": inside the disc where it fits (its width less 8px on each
+ * side), at 7px with the design's 0.7 tracking, else 7px untracked, else 6.5px untracked; never
+ * smaller and never clipped. Its words (model.ts ORCH_LABELS) always fit; a wider one would go on a
+ * line under the dashed ring, at the design's 7px.
  */
-const ORCH_ROOM = 36
-const orchStatusText = (T: Tokens, at: [number, number], word: string): string => {
-  const fits = [
-    { size: 7, tracking: 0.7 },
-    { size: 7, tracking: 0 },
-    { size: 6.5, tracking: 0 },
-  ].find(({ size, tracking }) => word.length * (size * 0.6 + tracking) - tracking <= ORCH_ROOM)
-  const o = { fill: T.secondary, face: 'mono' as const, anchor: 'middle' as const }
+export const orchRoomOf = (disc: number): number => disc * 2 - 16
+export const ORCH_ROOM = orchRoomOf(ORCH_DISC_R)
+export const ORCH_SIZES = [
+  { size: 7, tracking: 0.7 },
+  { size: 7, tracking: 0 },
+  { size: 6.5, tracking: 0 },
+]
+/** A mono word's width at `size` with `tracking` px between its characters. */
+export const orchWordWidth = (word: string, size: number, tracking: number): number => word.length * (size * 0.6 + tracking) - tracking
+const orchStatusText = (T: Tokens, at: [number, number], word: string, needs: boolean, disc: number): string => {
+  const fits = ORCH_SIZES.find(({ size, tracking }) => orchWordWidth(word, size, tracking) <= orchRoomOf(disc))
+  const o = { fill: needs ? T.ink.needs : T.secondary, face: 'mono' as const, anchor: 'middle' as const }
   if (fits) return text(at[0], baseline(at[1] + 2, 10, fits.size), word, { ...o, size: fits.size, tracking: fits.tracking })
-  return text(at[0], baseline(at[1] + 32, 10, 7), word, { ...o, size: 7, tracking: 0.7 })
+  return text(at[0], baseline(at[1] + Math.round(orchRingOf(disc)) + 2, 10, 7), word, { ...o, size: 7, tracking: 0.7 })
 }
 
 /** Legend type: items are 10px mono at 0.6 tracking, "AGENTS" at 1 (px per character). */
@@ -1040,23 +1078,27 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
       [47, 94, 141, 188, 235, 282, 329].map(x => `<path d="M${gx + x - 1} ${gy}V${gy + G}" stroke="${T.grid}"/>`).join('') +
       rows.map(y => `<path d="M${gx} ${gy + y - 1}H${gx + 376}" stroke="${T.grid}"/>`).join('')
     const orchAt: [number, number] = [gx + ORCH[0], gy + ORCH[1]]
+    const circle = orchCircleFor(G)
     const links = SEATS.map(([sx, sy], index) => {
       const look = looks[index] ?? 'idle'
       const seat: [number, number] = [gx + sx, gy + sy]
-      return look === 'working' ? flowingLink(ctx, String(index), seat, orchAt, 14, 23) : link(ctx, look, linkPath(seat, orchAt, 14, 23))
+      return look === 'working' ? flowingLink(ctx, String(index), seat, orchAt, 14, circle.disc + 1) : link(ctx, look, linkPath(seat, orchAt, 14, circle.disc + 1))
     }).join('')
     const orchStatus = orchestratorOf(state).status
-    const ringClass = m(ctx, `m spin${orchStatus === 'dispatching' ? ' fast' : ''}`)
+    // The ring always turns, in every status and whether or not the pane is live (a paused task or a
+    // quiet minute, as while the orchestrator waits on the person, stops the rest); only reduced
+    // motion stops it (the `.m` rule).
+    const ringClass = `m spin${orchStatus === 'dispatching' ? ' fast' : ''}`
     const ringStyle = phase(ctx, orchStatus === 'dispatching' ? 8000 : 24000)
     const nodes = SEATS.map(([sx, sy], index) => {
       const slot = slots[index]
       const look = looks[index] ?? 'idle'
       if (!slot) return ''
-      const labelTop = index < 2 ? 16 : G - 22
+      const labelTop = nodeLabelTop(G, index)
       const lit = look === 'working' || look === 'needs_user' || look === 'in_review'
       return (
         avatar(T, slot.name, look, gx + sx - 14, gy + sy - 14, ctx.motion) +
-        text(gx + sx, baseline(gy + labelTop, 12, 9), fit(slot.name.toUpperCase(), 90, 9, 'mono', 0.9), {
+        text(gx + sx, baseline(gy + labelTop, 12, 9), fit(slot.name.toUpperCase(), NODE_LABEL_MAX, 9, 'mono', 0.9), {
           size: 9,
           fill: lit ? T.text : look === 'idle' ? T.tertiary : T.secondary,
           face: 'mono',
@@ -1067,9 +1109,9 @@ export const agentsSection = (data: MissionData, now: number, theme: ThemeMode, 
       )
     }).join('')
     const orch =
-      orchestratorNode(T, orchAt[0], orchAt[1], ringClass, ringStyle) +
+      orchestratorNode(T, orchAt[0], orchAt[1], ringClass, ringStyle, orchStatus === 'needs_user', circle.disc) +
       text(orchAt[0], baseline(orchAt[1] - 11, 12, 9), 'ORCH', { size: 9, fill: T.ink.orch, face: 'mono', weight: 500, tracking: 0.9, anchor: 'middle' }) +
-      orchStatusText(T, orchAt, orchStatus === 'needs_user' ? 'NEEDS YOU' : orchStatus.toUpperCase())
+      orchStatusText(T, orchAt, ORCH_LABELS[orchStatus], orchStatus === 'needs_user', circle.disc)
     // The one-shot packets and pulses are a drawing of their own over this one (agentsPackets), so a
     // new event does not redraw the agents.
     const graph =
@@ -1160,7 +1202,7 @@ export const activitySummary = (data: MissionData, now: number, theme: ThemeMode
   const task = data.state?.task ?? null
   const lines = wrap(task ? task.title : 'Nothing is running', W - 32, 13, 2)
   const barTop = 16 + lines.length * 19 + 10
-  const height = barTop + 3 + 16 + 1
+  const height = barTop + 3 + SECTION_GAP + 1
   const svg = doc(theme, W, height, T => {
     const ctx = ctxFor(data, now, 'as', T)
     const content =
@@ -1168,12 +1210,23 @@ export const activitySummary = (data: MissionData, now: number, theme: ThemeMode
         .map((line, index) => text(16, baseline(16 + index * 19, 19, 13), line, { size: 13, fill: task ? T.text : T.secondary, weight: 500 }))
         .join('') + progress(ctx, data.state, data.events, 16, barTop, W - 32, 3).bars
     return { body: hline(T, 0) + greyed(ctx, content) + hline(T, height - 1) }
-  })
+  }, true)
   return { key: 'a-summary', svg, height, width: W, alt: task ? task.title : 'Nothing is running' }
 }
 
 /** The orchestrator's name as the events carry it. */
 const isOrchestrator = (event: McEvent): boolean => event.from.trim().toLowerCase() === 'orchestrator'
+
+const ROLES: ReadonlySet<string> = new Set(['orchestrator', 'explorer', 'worker', 'tester', 'security'])
+const PERSON: ReadonlySet<string> = new Set(['user', 'owner', 'person'])
+/** Who an event is from, for its colour (tokens.ts `actor`): the person, the orchestrator, a helper role, or another agent. */
+export const actorOf = (from: string): Actor => {
+  const id = from.trim().toLowerCase()
+  if (PERSON.has(id)) return 'user'
+  return ROLES.has(id) ? (id as Actor) : 'other'
+}
+/** An older event's dot: its sender's colour, dimmed. */
+const OLDER_DOT = 0.55
 
 /**
  * The timeline's items, newest first: one per event, except that consecutive progress lines from
@@ -1204,9 +1257,9 @@ const TEXT_W = W - 16 - 77
 const entryHeight = (lines: number, headed: boolean) => (headed ? 20 + 2 : 0) + Math.max(lines, 1) * 18 + (headed ? 0 : 4)
 
 /**
- * The timeline: newest first, every event kept (40), the newest lit. An agent's own lines sit under
- * its name with a cyan dot; an agent's run of progress lines shares one heading, each line with its
- * time on the left. The orchestrator's lines are quieter (its name in secondary), so the agents' stand out.
+ * The timeline: newest first, every event kept (40), the newest lit. Each sender's dot and name take
+ * its colour (tokens.ts `actor`), an older event's dot dimmed; an agent's run of progress lines
+ * shares one heading, each line with its time on the left. The orchestrator's lines are quieter.
  */
 export const timeline = (data: MissionData, now: number, theme: ThemeMode): Piece => {
   const items = timelineItems(data.events)
@@ -1214,10 +1267,10 @@ export const timeline = (data: MissionData, now: number, theme: ThemeMode): Piec
   // Work for something other than the current task carries a quiet mark at the start of its line.
   const wrapped = items.map(item => item.events.map(event => wrap(event.side ? `Other task · ${event.text}` : event.text, TEXT_W, 12, 2)))
   const itemHeights = wrapped.map(lines => lines.reduce((sum, each, index) => sum + entryHeight(each.length, index === 0), 0) + 18)
-  const height = Math.max(18 + 12 + 14 + (items.length === 0 ? 40 : itemHeights.reduce((sum, h) => sum + h, 0)), 120)
+  const height = Math.max(SECTION_GAP + 12 + 14 + (items.length === 0 ? 40 : itemHeights.reduce((sum, h) => sum + h, 0)), 120)
   const svg = doc(theme, W, height, T => {
     const ctx = ctxFor(data, now, 'tl', T)
-    let y = 18
+    let y = SECTION_GAP
     let content =
       label(16, y, 'TODAY', T.tertiary) +
       label(W - 16, y, `${count} ${count === 1 ? 'EVENT' : 'EVENTS'} · NEWEST FIRST`, T.tertiary, {
@@ -1231,6 +1284,7 @@ export const timeline = (data: MissionData, now: number, theme: ThemeMode): Piec
       const lines = wrapped[itemIndex] ?? []
       const top = y
       const quiet = item.events[0] ? isOrchestrator(item.events[0]) : false
+      const color = T.actor[actorOf(item.from)]
       item.events.forEach((event, eventIndex) => {
         const newest = itemIndex === 0 && eventIndex === 0
         const headed = eventIndex === 0
@@ -1242,15 +1296,14 @@ export const timeline = (data: MissionData, now: number, theme: ThemeMode): Piec
           face: 'mono',
         })
         const cy = headed ? y + 9.5 : y + 9
+        // The dot and the name in the sender's colour; an older event's dot dimmed, the newest lit.
         if (newest) {
-          content += `<circle cx="61.5" cy="${cy}" r="3.5" fill="${T.working}" style="filter:drop-shadow(0 0 3px ${alpha(T.working, T.glowDot)})"/>`
-        } else if (event.type === 'progress') {
-          content += dot(61.5, cy, headed ? 3.5 : 2.5, T.working)
+          content += `<circle cx="61.5" cy="${cy}" r="3.5" fill="${color}" style="filter:drop-shadow(0 0 3px ${alpha(color, T.glowDot)})"/>`
         } else {
-          content += dot(61.5, cy, 3.5, T.idleDot)
+          content += `<g opacity="${OLDER_DOT}">${dot(61.5, cy, headed ? 3.5 : 2.5, color)}</g>`
         }
         if (headed) {
-          content += text(77, baseline(y, 20, 13), fit(nameOf(event), TEXT_W, 13), { size: 13, fill: quiet ? T.secondary : T.text, weight: 500 })
+          content += text(77, baseline(y, 20, 13), fit(nameOf(event), TEXT_W, 13), { size: 13, fill: color, weight: 500 })
         }
         eventLines.forEach((line, row) => {
           content += text(77, baseline(textTop + row * 18, 18, 12), line, { size: 12, fill: quiet ? T.tertiary : T.secondary })
@@ -1261,7 +1314,7 @@ export const timeline = (data: MissionData, now: number, theme: ThemeMode): Piec
       if (itemIndex < items.length - 1) content += `<path d="M61.5 ${top + 17}V${y + 2}" stroke="${T.line}"/>`
     })
     return { body: greyed(ctx, content) }
-  })
+  }, true)
   return { key: 'a-timeline', svg, height, width: W, alt: `${count} events, newest first` }
 }
 

@@ -6,7 +6,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import { orchestratorOf, parseState, type McEvent, type McState } from './model'
-import { apply, appendLines, emptyState, roleName, sayEvent, stateText, tooSoon, type Report } from './writer'
+import { apply, appendLines, emptyState, roleName, sayEvent, stateText, tooSoon, turnState, type Report } from './writer'
 
 export type Paths = { dir: string; state: string; events: string }
 let paths: Promise<Paths> | null = null
@@ -193,6 +193,26 @@ export function report($: EngineInterface, updates: Report[] | ((state: McState)
       alsoWritten?.()
     }
     return error === undefined ? { applied, notes } : { applied, error, notes }
+  })
+}
+
+/**
+ * The orchestrator's own turn begins (`open`) or ends (writer.ts `turnState`). A state file that is
+ * not a state is left for the next report to keep.
+ */
+export function writeTurn($: EngineInterface, open: boolean): Promise<void> {
+  return serially(async () => {
+    const { state: STATE_FILE } = await pathsOf($)
+    if (!STATE_FILE) return
+    const raw = await readIfThere($, STATE_FILE)
+    if (raw === null) return
+    const stored = stateFrom(raw, await $.clock.now())
+    // Ending a turn that is not stored (already ended, or never opened) writes nothing.
+    if (stored.bad || (!open && stored.state.orchestrator.turn === undefined)) return
+    const state = settled(turnState(stored.state, open, await $.clock.now()))
+    await $.fs.write(STATE_FILE, stateText(state))
+    onWritten?.(state)
+    alsoWritten?.()
   })
 }
 

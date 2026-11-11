@@ -39,7 +39,7 @@ export const KEEP_EVENTS = 40
 const TASK_STATUSES: TaskStatus[] = ['idle', 'running', 'paused', 'done', 'failed']
 const STEP_STATUSES: StepStatus[] = ['pending', 'active', 'done', 'skipped']
 const AGENT_STATUSES: AgentStatus[] = ['idle', 'queued', 'working', 'in_review', 'done', 'needs_user']
-const ORCH_STATUSES: OrchStatus[] = ['idle', 'planning', 'dispatching', 'waiting', 'reviewing', 'needs_user', 'done']
+const ORCH_STATUSES: OrchStatus[] = ['idle', 'planning', 'dispatching', 'working', 'waiting', 'reviewing', 'needs_user', 'done']
 const EVENT_TYPES: EventType[] = [
   'dispatch',
   'report',
@@ -116,6 +116,8 @@ export function parseState(raw: string): McState | null {
       reviewing: list(orchestrator.reviewing).filter((name): name is string => typeof name === 'string'),
       // When the orchestrator last set its own status (absent in older files).
       ...(typeof orchestrator.since === 'number' ? { since: orchestrator.since } : {}),
+      // While its own turn runs: when that turn began.
+      ...(typeof orchestrator.turn === 'number' ? { turn: orchestrator.turn } : {}),
     },
     lastUpdated: num(value.lastUpdated),
   }
@@ -162,17 +164,36 @@ export function readNewLines(text: string, offset: number): { events: McEvent[];
 /** An agent in review longer than this shows how long, so a forgotten review is never normal. */
 export const REVIEW_STALE_MS = 120_000
 
-/** The statuses the orchestrator sets itself; every other one is derived from its agents. */
-export const ORCH_OWN: ReadonlySet<string> = new Set(['planning', 'dispatching', 'needs_user'])
+/** The statuses the orchestrator sets itself; every other one is derived from its agents and its turn. */
+export const ORCH_OWN: ReadonlySet<string> = new Set(['planning', 'dispatching', 'working', 'needs_user'])
+/** The ones that last only for the turn they were set in: dropped when its turn ends. */
+export const ORCH_TURN_ONLY: ReadonlySet<string> = new Set(['planning', 'dispatching', 'working'])
 /** The updates of one call are timed a millisecond apart: an agent's change in the same call is not "after". */
 const SAME_CALL_MS = 64
 
 /**
- * The orchestrator as its agents show it, one rule for both writers and the pane. Whom it waits
- * on is always the agents working, and whom it reviews the agents in review. Its status: its own
- * PLANNING, DISPATCHING or NEEDS YOU while no agent's state has changed since it set it; else
- * REVIEWING while any agent is in review, WAITING while any works, DONE for a finished task, else
- * IDLE (or what it set, while a task runs and no agent is busy).
+ * The word the circle draws under ORCH for each status: upper case, at most 9 characters, and
+ * always inside the circle (draw.ts ORCH_ROOM). NEEDS YOU as the agent cards say it. The ids stay.
+ */
+export const ORCH_LABELS: Record<OrchStatus, string> = {
+  idle: 'IDLE',
+  planning: 'PLANNING',
+  dispatching: 'BRIEFING',
+  working: 'WORKING',
+  waiting: 'WAITING',
+  reviewing: 'REVIEWING',
+  needs_user: 'NEEDS YOU',
+  done: 'DONE',
+}
+
+/**
+ * The orchestrator as its agents and its own turn show it, one rule for both writers and the pane.
+ * Whom it waits on is always the agents working, and whom it reviews the agents in review. Its
+ * status, in this order: NEEDS YOU while what it set stands (no agent's state changed since);
+ * REVIEWING while any agent is in review; while its own turn runs (`turn`), DONE if it finished the
+ * task in this turn, PLANNING or DISPATCHING if it set one in this turn and it stands, else WORKING;
+ * outside a turn, what it set while that stands (a writer with no turns, such as the CLI); WAITING
+ * while any agent works; DONE for a finished task, else IDLE (or what it set, while a task runs).
  */
 export function orchestratorOf(state: McState | null): McState['orchestrator'] {
   const orch = state?.orchestrator ?? { status: 'idle' as const, waitingOn: [], reviewing: [] }
@@ -180,15 +201,23 @@ export function orchestratorOf(state: McState | null): McState['orchestrator'] {
   const reviewing = state.agents.filter(agent => agent.status === 'in_review').map(agent => agent.name)
   const waitingOn = state.agents.filter(agent => agent.status === 'working').map(agent => agent.name)
   const lastChange = Math.max(0, ...state.agents.map(agent => agent.startedAt))
-  const since = orch.since === undefined ? {} : { since: orch.since }
-  if (ORCH_OWN.has(orch.status) && orch.since !== undefined && orch.since + SAME_CALL_MS >= lastChange) return { status: orch.status, waitingOn, reviewing, ...since }
-  if (reviewing.length > 0) return { status: 'reviewing', waitingOn, reviewing, ...since }
-  if (waitingOn.length > 0) return { status: 'waiting', waitingOn, reviewing, ...since }
+  const kept = { ...(orch.since === undefined ? {} : { since: orch.since }), ...(orch.turn === undefined ? {} : { turn: orch.turn }) }
+  const as = (status: OrchStatus): McState['orchestrator'] => ({ status, waitingOn, reviewing, ...kept })
+  const stands = ORCH_OWN.has(orch.status) && orch.since !== undefined && orch.since + SAME_CALL_MS >= lastChange
+  if (orch.status === 'needs_user' && stands) return as('needs_user')
+  if (reviewing.length > 0) return as('reviewing')
+  if (orch.turn !== undefined) {
+    const thisTurn = orch.since !== undefined && orch.since >= orch.turn
+    if (orch.status === 'done' && thisTurn) return as('done')
+    if ((orch.status === 'planning' || orch.status === 'dispatching') && stands && thisTurn) return as(orch.status)
+    return as('working')
+  }
+  if (stands) return as(orch.status)
+  if (waitingOn.length > 0) return as('waiting')
   const running = state.task?.status === 'running' || state.task?.status === 'paused'
-  if (!running) return { status: orch.status === 'done' ? 'done' : 'idle', waitingOn, reviewing, ...since }
+  if (!running) return as(orch.status === 'done' ? 'done' : 'idle')
   // A running task with no agent busy: what it set, unless that was waiting or reviewing on no one.
-  const status = orch.status === 'waiting' || orch.status === 'reviewing' ? 'idle' : orch.status
-  return { status, waitingOn, reviewing, ...since }
+  return as(orch.status === 'waiting' || orch.status === 'reviewing' ? 'idle' : orch.status)
 }
 
 /**

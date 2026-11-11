@@ -9,7 +9,7 @@ import { AGENT_STATUSES, EVENT_TYPES, ORCH_STATUSES, REPORT_KINDS, STEP_STATUSES
 /** The lists the text names, from the writer's own: so the contract cannot drift from what it accepts. */
 const list = (items: readonly string[]): string => items.map(item => `\`${item}\``).join(', ')
 const QUEUE_KINDS = REPORT_KINDS.filter(kind => kind.startsWith('queue.'))
-const ORCH_OWN_STATUSES = ['planning', 'dispatching', 'needs_user'] as const
+const ORCH_OWN_STATUSES = ['planning', 'dispatching', 'working', 'needs_user'] as const
 
 export const TOOL_NAME = 'report'
 export const TOOL_FULL_NAME = 'mcp__mission-control__report'
@@ -28,7 +28,7 @@ The Mission Control pane shows the person what you and your helper agents are do
 - A helper's question: a helper that ends its turn on a next-step question, or waits on a question tool, shows NEEDS YOU with that question by itself, and working again once answered. Its question is waiting on the person, not on you.
 - Briefs: every brief you give a helper includes, as a requirement, the line it uses to report its own progress and its final report line (the tool with \`as\` and \`say\`, or \`mc.py say --as <role> "..."\`).
 - A helper's result: your FIRST action when it arrives is, in one call, \`agent\` with status \`in_review\` and one line of what it reported, and the \`report\` event if the helper did not add its own (you show as reviewing by yourself). In the same turn in which you read the report, accept it (\`accept\` with its \`name\`: done, \`agent_done\` logged) or send it back (\`sendback\` with \`name\` and \`task\`: working, a dispatch logged). Never set \`done\` before you have read the report. If you try to finish with an agent still in review, the plugin asks you once to settle it.
-- Orchestrator: your status follows your agents: reviewing while any is in review, waiting (on those working) while any works, else idle, or done after \`task.done\`. Set only your own: \`orch\` with ${list(ORCH_OWN_STATUSES)}, which shows until an agent's state changes. Whom you wait on and review is never written; it is read from the agents. (All statuses: ${ORCH_STATUSES.join(', ')}.)
+- Orchestrator: your status follows your agents and your own turn, in this order: needs_user while what you set stands; reviewing while any agent is in review; while your own turn runs, working (or the planning or dispatching you set in this turn); waiting (on those working) while any works; done after \`task.done\`; else idle. The plugin knows your turn: working needs nothing from you, and planning, dispatching and working are dropped when the turn ends; \`task.start\`, \`task.done\` and \`task.fail\` start your status over. Set only your own: \`orch\` with ${list(ORCH_OWN_STATUSES)}, which shows until an agent's state changes. Whom you wait on and review is never written; it is read from the agents. (All statuses: ${ORCH_STATUSES.join(', ')}.)
 - Events: one for every dispatch (you to an agent), report (an agent to you), handoff (agent to agent), agent_done, needs_user, plan_changed, user_message, task_done and task_failed (\`progress\` lines are the helpers' own; \`task_paused\` and \`task_resumed\` are logged by \`task.pause\` and \`task.resume\`). All event types: ${list(EVENT_TYPES)}; one plain sentence (100 characters at most) with the useful detail: a commit, a branch, a number.
 - Heartbeat: while your task runs the plugin keeps the pane LIVE; there is nothing to send (the \`heartbeat\` update is for scripts).
 
@@ -61,7 +61,7 @@ export const TOOL_SCHEMA: Record<string, unknown> = {
           status: {
             type: 'string',
             enum: [...new Set([...STEP_STATUSES, ...AGENT_STATUSES, ...ORCH_STATUSES])],
-            description: `plan.step: ${STEP_STATUSES.join('|')}. agent: ${AGENT_STATUSES.join('|')}. orch: ${ORCH_OWN_STATUSES.join('|')} (the rest follow the agents).`,
+            description: `plan.step: ${STEP_STATUSES.join('|')}. agent: ${AGENT_STATUSES.join('|')}. orch: ${ORCH_OWN_STATUSES.join('|')} (the rest follow the agents and your turn).`,
           },
           name: text('agent: the agent, such as Explorer, Worker, Tester or Security.'),
           task: text('agent: what it is doing now, one plain sentence of 80 characters at most; for queued, what it waits for; for needs_user, the exact question; optional for idle.'),
