@@ -9,7 +9,7 @@ import { activityLines, overviewLines, plainOf } from '../hooks/mission/term'
 import { baseline, cellsOf, timeOfDay } from '../hooks/mission/text'
 import { GHOST_MS, steady } from '../hooks/mission/swap'
 import { addHolds, heldAgents, shotTargets } from '../hooks/mission/hold'
-import { activitySummary, agentsPackets, legendOf, modeOf, pill, SHOT_MS, SHOT_R, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth } from '../hooks/mission/draw'
+import { activitySummary, agentsPackets, legendOf, modeOf, pill, SHOT_MS, SHOT_R, SECTION_GAP, timeline, ORCH_CLEAR, orchCircleFor, ORCH_ROOM, orchRoomOf, ORCH_SIZES, orchWordWidth, taskLabelOf } from '../hooks/mission/draw'
 import { ORCH_DISC_R, orchestratorNode } from '../hooks/mission/icons'
 import { alpha, DARK, LIGHT } from '../hooks/mission/tokens'
 import { clockKeyOf, DONE_SHOWN_MS, isOffline, resultsOf, OFFLINE_MS, ORCH_LABELS, orchestratorOf, type McAgent, type McEvent, type McState, type MissionData } from '../hooks/mission/model'
@@ -2704,4 +2704,14 @@ test('NEEDS YOU gives way to task.done, task.fail, task.start and task.resume', 
   expect(orch().status).toBe('needs_user')
   await call([{ do: 'task.resume' }])
   expect(orch().status).toBe('working')
+})
+
+test('the task card is "Current task" only while its task runs or is paused: a finished or failed one is the last task', () => {
+  const at = (status: string) => ({ task: { status } }) as never as McState
+  expect(taskLabelOf(null)).toBe('No task')
+  expect(taskLabelOf({ task: null } as never as McState)).toBe('No task')
+  expect(taskLabelOf(at('running'))).toBe('Current task')
+  expect(taskLabelOf(at('paused'))).toBe('Current task')
+  expect(taskLabelOf(at('done'))).toBe('Last task')
+  expect(taskLabelOf(at('failed'))).toBe('Last task')
 })

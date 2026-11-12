@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderElement, Timer } from 'claude-cod
 
 import type { MissionTheme, MissionView } from '../../types'
 import { SECTION, SECTION_ID, TOOL_DESCRIPTION, TOOL_FULL_NAME, TOOL_NAME, TOOL_SCHEMA } from './contract'
-import { activity, BACK_SQUARE, backPiece, MEASURE_PX, measuring, modeOf, overview, pill, SHOT_MS, shotPlan, slice, type Piece } from './draw'
+import { activity, BACK_SQUARE, backPiece, MEASURE_PX, measuring, modeOf, overview, pill, SHOT_MS, shotPlan, slice, taskLabelOf, type Piece } from './draw'
 import { addHolds, heldAgents, type Hold } from './hold'
 import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, PART_TYPES, parseState, readNewLines, resultsOf, type McAgent, type McEvent, type McState, type MissionData } from './model'
 import { GHOST_MS, settle, shown as asShown, steady, type Shown } from './swap'
@@ -699,7 +699,7 @@ export const registerMission: Register = on => {
       const [summary, list] = activity(data, now, theme)
       const items: RenderElement[] = [
         // Header: Back (the drawn 28px square with the chevron-left, 12px in, then 8px),
-        // "Activity / CURRENT TASK" from the design's x 48, the pill at the right.
+        // "Activity / CURRENT TASK" (or LAST TASK, NO TASK: the task card's own name) from the design's x 48, the pill at the right.
         <Box flexDirection="row" alignItems="center">
           {(() => {
             // Back as three bands: the 12px before the square, the square (the press target), the 8px after.
@@ -718,7 +718,7 @@ export const registerMission: Register = on => {
           </Text>
           <Box width={1} />
           <Text size="caption" mono {...quieter}>
-            / CURRENT TASK
+            / {taskLabelOf(data.state).toUpperCase()}
           </Text>
           <Box flexGrow={1} />
           {draw(pill(data, now, theme))}

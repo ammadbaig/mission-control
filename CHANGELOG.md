@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.10
+
+- The task card is named for its task's state: CURRENT TASK only while the task runs or is paused, LAST TASK once it is finished or failed, NO TASK when there is none. The Activity view's header and the card's description for screen readers say the same.
+
 ## 1.0.9
 
 - A new conversation starts on the empty state when the last task is finished: plain `/mission` in a conversation the plugin does not know as the orchestrator clears a done or failed task (its plan and agents; the queue stays, the log is kept), and the pane shows no events while there is no task. A running or paused task is never cleared.

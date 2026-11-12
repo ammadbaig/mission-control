@@ -462,10 +462,21 @@ export const CARD_CAP = 15
 /** Where the row's words start: 1px border + 14 + the 6px dot + 8. */
 export const ROW_LEFT = 29
 
+/**
+ * What the task card is called: "Current task" only while its task runs or is paused; a finished or
+ * failed one is the last task, and with none there is no task.
+ */
+export const taskLabelOf = (state: McState | null): string => {
+  const status = state?.task?.status
+  if (!status) return 'No task'
+  return status === 'done' || status === 'failed' ? 'Last task' : 'Current task'
+}
+
 export const taskTop = (data: MissionData, now: number, theme: ThemeMode): Piece => {
   const height = CARD_TOP
   const task = data.state?.task ?? null
-  let alt = 'Current task: nothing is running'
+  const name = taskLabelOf(data.state)
+  let alt = `${name}: nothing is running`
   const svg = doc(theme, CARD_W, height, T => {
     const ctx = ctxFor(data, now, 'tk', T)
     const ix = 15
@@ -474,13 +485,13 @@ export const taskTop = (data: MissionData, now: number, theme: ThemeMode): Piece
     const gradient =
       `<defs><linearGradient id="${ctx.id}-bg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${T.orch}" stop-opacity="0.07"/><stop offset="1" stop-color="${T.orch}" stop-opacity="0.01"/></linearGradient></defs>` +
       `<path d="${edge}Z" fill="url(#${ctx.id}-bg)"/><path d="${edge}" stroke="${T.line}"/>`
-    let content = label(ix, 15, 'CURRENT TASK', T.tertiary)
+    let content = label(ix, 15, name.toUpperCase(), T.tertiary)
     wrap(task ? task.title : 'Nothing is running', iw, 15, 2).forEach((line, index) => {
       content += text(ix, baseline(35 + index * 22, 22, 15), line, { size: 15, fill: task ? T.text : T.secondary, weight: 500 })
     })
     const { bars, caption } = progress(ctx, data.state, data.events, ix, 93, iw, 4)
     content += bars + captionRow(ctx, caption, ix, 105, iw) + hline(T, 131, ix, ix + iw)
-    if (task) alt = `Current task: ${task.title}. ${caption.left} ${caption.count}`
+    if (task) alt = `${name}: ${task.title}. ${caption.left} ${caption.count}`
     return { body: gradient + greyed(ctx, content), style: clockStyle([16]) }
   })
   return { key: 'task-top', svg, height, width: CARD_W, alt }
