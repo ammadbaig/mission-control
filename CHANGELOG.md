@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.9
+
+- A new conversation starts on the empty state when the last task is finished: plain `/mission` in a conversation the plugin does not know as the orchestrator clears a done or failed task (its plan and agents; the queue stays, the log is kept), and the pane shows no events while there is no task. A running or paused task is never cleared.
+- `/mission` makes the conversation the orchestrator (unless it is a known helper), so its work shows WORKING from its next prompt or tool call, before its first report. The command itself opens no turn.
+- An accepted agent stays accepted: the note that its session finished a turn no longer puts it back In review while the task runs or is paused (before, only a finished task kept it). A new brief, a send back or a new report line of its own still moves it.
+- The orchestrator's NEEDS YOU stays until the person answers (their own prompt), it sets another status, or a task starts, ends or resumes. An accept, a send back, a helper's report or line, `task.pause`, or a turn the person did not start no longer drops it, so a paused task waiting on you shows NEEDS YOU.
+
 ## 1.0.8
 
 - The task card's latest update shows only the current task's own lines: never a line from an earlier task or side work. Until the task has one, it reads "Orchestrator · Started" at the task's start time. The terminal pane follows the same rule; the Activity view still lists everything.

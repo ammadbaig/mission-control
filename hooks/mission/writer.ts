@@ -264,6 +264,8 @@ export function apply(current: McState, report: Report, now: number, id: () => s
       state.task.status = 'running'
       delete state.task.pausedAt
       delete state.task.pauseReason
+      // Going on answers the orchestrator's own question.
+      if (state.orchestrator.status === 'needs_user') restOrchestrator(state, 'idle', now)
       state.lastUpdated = now
       return { state, event: { time: now, type: 'task_resumed', from: 'orchestrator', to: '', text: 'Resumed' } }
     }

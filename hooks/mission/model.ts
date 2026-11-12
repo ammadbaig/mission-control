@@ -193,7 +193,8 @@ export const ORCH_LABELS: Record<OrchStatus, string> = {
 /**
  * The orchestrator as its agents and its own turn show it, one rule for both writers and the pane.
  * Whom it waits on is always the agents working, and whom it reviews the agents in review. Its
- * status, in this order: NEEDS YOU while what it set stands (no agent's state changed since);
+ * status, in this order: NEEDS YOU while it stands (until the person answers, another status is set
+ * or a task starts, ends or resumes; no agent's change drops it);
  * REVIEWING while any agent is in review; while its own turn runs (`turn`), DONE if it finished the
  * task in this turn, PLANNING or DISPATCHING if it set one in this turn and it stands, else WORKING;
  * outside a turn, what it set while that stands (a writer with no turns, such as the CLI); WAITING
@@ -217,7 +218,9 @@ export function orchestratorOf(state: McState | null, now?: number): McState['or
   const stands = ORCH_OWN.has(orch.status) && orch.since !== undefined && orch.since + SAME_CALL_MS >= lastChange
   const finishedAt = state.task?.finishedAt
   const done = orch.status === 'done' && (now === undefined || finishedAt === undefined || now - finishedAt < DONE_SHOWN_MS)
-  if (orch.status === 'needs_user' && stands) return as('needs_user')
+  // NEEDS YOU stands until the person answers, the orchestrator sets another status, or a task
+  // starts, ends or resumes (writer.ts, io.ts `answered`): no agent's change drops it.
+  if (orch.status === 'needs_user') return as('needs_user')
   if (reviewing.length > 0) return as('reviewing')
   if (orch.turn !== undefined) {
     const thisTurn = orch.since !== undefined && orch.since >= orch.turn

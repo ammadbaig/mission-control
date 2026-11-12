@@ -38,13 +38,20 @@ const DIR = 'C:\\Users\\someone'
  * A host that isn't Windows takes `C:/...` for a relative path and puts its working folder in
  * front, so files are kept from `C:/` on.
  */
-function engine(on: On, options: { eventsUnreadable?: boolean; appData?: boolean; transcriptAge?: { ms: number }; unmeasured?: boolean } = {}): { files: Map<string, string>; clock: MockClock } {
+function engine(on: On, options: { eventsUnreadable?: boolean; appData?: boolean; transcriptAge?: { ms: number }; unmeasured?: boolean; store?: Map<string, unknown> } = {}): { files: Map<string, string>; clock: MockClock } {
   const files = new Map<string, string>()
   const at = (path: string) => path.slice(Math.max(0, path.indexOf('C:/')))
   // Each write moves the file's change time, as a disk does (its length alone may not change).
   const writes = new Map<string, number>()
   const clock = mock.clock(on, { now: Date.UTC(2026, 0, 1, 9) })
-  mock.store(on)
+  // The plugin's own store: in memory, or the test's map when it reads what was stored.
+  const store = options.store
+  if (store) {
+    on('store.get', (_, e) => ({ value: store.get(e.key) }))
+    on('store.set', (_, e) => ({ value: void store.set(e.key, e.value) }))
+    on('store.delete', (_, e) => ({ value: void store.delete(e.key) }))
+    on('store.keys', () => ({ value: [...store.keys()] }))
+  } else mock.store(on)
   on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? DIR : e.name === 'APPDATA' && options.appData ? `${DIR}\\AppData\\Roaming` : undefined }))
   on('session.id', () => ({ value: 'cli-orch' }))
   // `tail -c <bytes> <path>`: the whole fake file is short enough to be its own tail.
@@ -970,7 +977,7 @@ test('a quiet transcript is not running, a max_tokens stop is an ended turn', as
   expect(agentOf(files, 'Tester')).toMatchObject({ status: 'in_review', currentTask: 'Handed in' })
 })
 
-test('one orchestrator rule: lists from the agents; its own planning holds until an agent changes', async ($, on) => {
+test('one orchestrator rule: lists from the agents; its own NEEDS YOU holds when an agent changes', async ($, on) => {
   const { files, clock } = engine(on)
   on('classic.Stop', () => ({}))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -981,9 +988,12 @@ test('one orchestrator rule: lists from the agents; its own planning holds until
   expect(orchestrator()).toMatchObject({ status: 'waiting', waitingOn: ['Explorer'], reviewing: [] })
   await $.tool.call({ tool: TOOL, updates: [{ do: 'orch', status: 'needs_user' }] } as never)
   expect(orchestrator()).toMatchObject({ status: 'needs_user', waitingOn: ['Explorer'] })
-  // An agent's state changes (later): its own status gives way to what the agents show.
+  // An agent's state changes (later): NEEDS YOU stays, the lists still follow the agents.
   await clock.advance(1000)
   await $.tool.call({ tool: TOOL, updates: [{ do: 'agent', name: 'Explorer', status: 'in_review', task: 'Reported' }] } as never)
+  expect(orchestrator()).toMatchObject({ status: 'needs_user', reviewing: ['Explorer'], waitingOn: [] })
+  // Another status of its own replaces it: the review then shows.
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'orch', status: 'planning' }] } as never)
   expect(orchestrator()).toMatchObject({ status: 'reviewing', reviewing: ['Explorer'], waitingOn: [] })
 })
 
@@ -2407,4 +2417,291 @@ test('the landing hold in the pane: card, node, line and circle switch together 
   await clock.advance(GHOST_MS + 150)
   expect((await agentsNow()).alt).toContain('Worker: in review')
   await mounted?.unmount()
+})
+
+// ---- a new conversation: /mission starts it on the empty state, and makes it the orchestrator --------
+
+const OLD_LINE = 'Old task line: checked the previews'
+/**
+ * The files an earlier conversation left: a task with a plan, an agent, a queued task and an event,
+ * ended by `end` (or still running), and that event in the log. Nothing is stored for this session.
+ */
+function earlier(files: Map<string, string>, at: number, end: Report | null): McState {
+  const updates: Report[] = [
+    { do: 'task.start', title: 'Earlier task' },
+    { do: 'plan.set', steps: ['Find', 'Fix'] },
+    { do: 'agent', name: 'Tester', status: 'working', task: 'Checking the previews' },
+    { do: 'queue.add', text: 'Next: tidy the docs' },
+  ]
+  const state = applied(emptyState(at), end ? [...updates, end] : updates, at)
+  files.set(STATE, JSON.stringify(state))
+  files.set(EVENTS, `${JSON.stringify({ time: at, type: 'progress', from: 'tester', to: 'orchestrator', text: OLD_LINE, taskId: state.task?.id })}\n`)
+  return state
+}
+const runMission = ($: Engine, args = '') => $.command.run({ command: 'mission', args, origin: { kind: 'person' }, presentation: { isFullscreen: false } } as never)
+const storedState = (files: Map<string, string>) => JSON.parse(files.get(STATE) ?? 'null') as McState
+/**
+ * The pane as the person sees it, Overview and Activity, on the desktop and in the terminal: read once
+ * a replaced drawing has been lifted (swap.ts keeps the old one GHOST_MS).
+ */
+async function paneText($: Engine, clock: MockClock): Promise<{ desktop: string; activity: string; terminal: string }> {
+  const desktop = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await clock.advance(GHOST_MS + 100)
+  const overviewSvg = (await desktop.findAll({ type: 'Svg' })).map(found => `${String(found.props.alt)}\n${String(found.props.source)}`).join('\n')
+  await desktop.press({ key: 'mission-open-activity' })
+  await clock.advance(GHOST_MS + 100)
+  const activitySvg = (await desktop.findAll({ type: 'Svg' })).map(found => `${String(found.props.alt)}\n${String(found.props.source)}`).join('\n')
+  await desktop.press({ key: 'mission-back' })
+  await desktop.unmount()
+  const terminal = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const words = (await terminal.findAll({ type: 'Text' })).map(found => found.text ?? '').join('\n')
+  await terminal.unmount()
+  return { desktop: overviewSvg, activity: activitySvg, terminal: words }
+}
+
+for (const end of [{ do: 'task.done' }, { do: 'task.fail' }] as const) {
+  test(`/mission in a new conversation clears a ${end.do === 'task.done' ? 'finished' : 'failed'} task: the pane shows the empty state and no old events`, async ($, on) => {
+    const { files, clock } = engine(on)
+    const before = earlier(files, clock.now() - 60_000, end)
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await clock.advance(1000)
+    // The old task is on the pane until /mission.
+    expect((await paneText($, clock)).desktop).toContain('Earlier task')
+    await runMission($)
+    const after = storedState(files)
+    expect(after.task).toBeNull()
+    expect(after.plan).toBeNull()
+    expect(after.agents).toEqual([])
+    expect(after.orchestrator.status).toBe('idle')
+    expect(after.queue).toEqual(before.queue)
+    // The log is left as it was.
+    expect(files.get(EVENTS)).toContain(OLD_LINE)
+    await clock.advance(1000)
+    const pane = await paneText($, clock)
+    for (const text of [pane.desktop, pane.activity, pane.terminal]) {
+      expect(text).not.toContain('Earlier task')
+      expect(text).not.toContain(OLD_LINE)
+      expect(text).not.toContain('Checking the previews')
+    }
+    expect(pane.desktop).toContain('Waiting for a task')
+    expect(pane.activity).not.toContain('1 events')
+    expect(pane.terminal).toContain('No task')
+  })
+}
+
+test('/mission leaves a running or paused task as it is', async ($, on) => {
+  const { files, clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const end of [null, { do: 'task.pause' } as Report]) {
+    earlier(files, clock.now(), end)
+    const kept = files.get(STATE)
+    await runMission($)
+    expect(storedState(files).task?.status).toBe(end ? 'paused' : 'running')
+    expect(storedState(files).agents).toEqual(JSON.parse(kept ?? 'null').agents)
+    await clock.advance(1000)
+    expect((await paneText($, clock)).desktop).toContain('Earlier task')
+  }
+})
+
+test('/mission in the conversation that ran the task (its id stored) leaves the finished task', async ($, on) => {
+  const { files, clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Its own report stores this session as the orchestrator.
+  await $.tool.call({ tool: TOOL, updates: [{ do: 'task.start', title: 'Earlier task' }, { do: 'agent', name: 'Tester', status: 'working', task: 'Checking' }, { do: 'task.done' }] } as never)
+  const kept = files.get(STATE)
+  await runMission($)
+  expect(files.get(STATE)).toBe(kept)
+  await clock.advance(1000)
+  expect((await paneText($, clock)).desktop).toContain('Earlier task')
+})
+
+test('/mission in a helper session leaves the finished task, and does not make it the orchestrator', async ($, on) => {
+  const stored = new Map<string, unknown>()
+  const { files } = engine(on, { store: stored })
+  on('tool.call', () => ({ result: 'ok' }))
+  // The orchestrator's watcher recorded this session as the Tester's.
+  files.set(ROLES, JSON.stringify({ 'cli-orch': 'Tester' }))
+  earlier(files, Date.UTC(2026, 0, 1, 9), { do: 'task.done' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const kept = files.get(STATE)
+  await runMission($)
+  expect(files.get(STATE)).toBe(kept)
+  expect(stored.get('orchestrating')).toBeUndefined()
+  // Its own work opens no orchestrator turn.
+  await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  expect(storedState(files).orchestrator.turn).toBeUndefined()
+})
+
+test('/mission makes a new conversation the orchestrator: no turn from the command, WORKING once its turn runs', async ($, on) => {
+  const stored = new Map<string, unknown>()
+  const { files, clock } = engine(on, { store: stored })
+  on('tool.call', () => ({ result: 'ok' }))
+  earlier(files, clock.now(), { do: 'task.done' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Before: unknown, so its own tool call opens no turn.
+  await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  expect(storedState(files).orchestrator.turn).toBeUndefined()
+  await runMission($)
+  expect(stored.get('orchestrating')).toEqual(['cli-orch'])
+  // The command alone opens no turn.
+  expect(storedState(files).orchestrator.turn).toBeUndefined()
+  await clock.advance(1000)
+  expect((await drawn($)).svg).not.toContain('>WORKING<')
+  // Its next tool call opens the turn: the circle says WORKING before any report.
+  await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  expect(storedState(files).orchestrator).toMatchObject({ status: 'working' })
+  await clock.advance(1000)
+  expect((await drawn($)).svg).toContain('>WORKING<')
+})
+
+test('starting a session alone leaves a finished task on the pane', async ($, on) => {
+  const { files, clock } = engine(on)
+  earlier(files, clock.now(), { do: 'task.done' })
+  const kept = files.get(STATE)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1000)
+  expect(files.get(STATE)).toBe(kept)
+  expect((await paneText($, clock)).desktop).toContain('Earlier task')
+})
+
+// ---- an accepted agent stays accepted; the orchestrator's NEEDS YOU waits for the person ---------------
+
+/** The orchestrator's session with a task, Worker working on it, and the calls the tests use. */
+async function orchestrating($: Engine, on: On) {
+  const made = engine(on)
+  on('tool.call', () => ({ result: 'ok' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const call = (updates: unknown[]) => $.tool.call({ tool: TOOL, updates } as never) as Promise<{ deny?: string }>
+  const helper = (as: string, updates: unknown[]) => $.tool.call({ tool: TOOL, as, updates } as never)
+  const stop = () => $.classic.Stop({ stop_hook_active: false } as never) as Promise<{ block?: string }>
+  /** The app's note that a helper session finished a turn, as the orchestrator's session receives it. */
+  const note = async (title: string, id: string) => {
+    await $.prompt.submit({ text: `The session "${title}" you started (${id}) finished a turn. It reported: "Done."`, wait: false, origin: { kind: 'sdk' } } as never)
+    await made.clock.advance(10)
+  }
+  const orch = () => storedState(made.files).orchestrator
+  await call([{ do: 'task.start', title: 'Ship it' }, { do: 'agent', name: 'Worker', status: 'working', task: 'Making the change' }])
+  return { ...made, call, helper, stop, note, orch }
+}
+
+for (const paused of [false, true]) {
+  test(`an accepted agent stays done when its turn ends and its note arrives, the task ${paused ? 'paused' : 'running'}`, async ($, on) => {
+    const { files, clock, call, helper, stop, note } = await orchestrating($, on)
+    await helper('worker', [{ do: 'say', type: 'report', text: 'Done: the change is made' }])
+    await clock.advance(1000)
+    await call([{ do: 'accept', name: 'Worker', text: 'Accepted' }])
+    if (paused) await call([{ do: 'task.pause', reason: 'Waiting for the owner' }])
+    // Its session finishes the turn that posted the report; the app's note comes after the accept.
+    await clock.advance(20_000)
+    await note('Worker', paused ? 'local_wk2' : 'local_wk1')
+    expect(agentOf(files, 'Worker')).toMatchObject({ status: 'done' })
+    expect(logOf(files).filter(line => line.startsWith('report worker>'))).toHaveLength(1)
+    // The turn-end guard has nothing to ask about it.
+    expect((await stop()).block).toBeUndefined()
+  })
+}
+
+test('an accepted agent sent back, or briefed again, is handed in by its next turn end as before', async ($, on) => {
+  const { files, clock, call, helper, note } = await orchestrating($, on)
+  await helper('worker', [{ do: 'say', type: 'report', text: 'Done: the change is made' }])
+  await clock.advance(1000)
+  await call([{ do: 'accept', name: 'Worker' }])
+  await clock.advance(1000)
+  await call([{ do: 'sendback', name: 'Worker', task: 'Fix the spacing too' }])
+  await clock.advance(20_000)
+  await note('Worker', 'local_wk3')
+  expect(agentOf(files, 'Worker')).toMatchObject({ status: 'in_review', currentTask: 'Handed in' })
+  // Accepted again, then a turn of its own after the accept that ends with a new report line.
+  await call([{ do: 'accept', name: 'Worker' }])
+  await clock.advance(6000)
+  await helper('worker', [{ do: 'say', text: 'Starting the follow-up' }])
+  await clock.advance(6000)
+  await helper('worker', [{ do: 'say', type: 'report', text: 'Done: follow-up made' }])
+  expect(agentOf(files, 'Worker')).toMatchObject({ status: 'in_review', currentTask: 'Done: follow-up made' })
+})
+
+test("the orchestrator's NEEDS YOU stays through an accept, a send back, a helper's report and line", async ($, on) => {
+  const { clock, call, helper, orch } = await orchestrating($, on)
+  await call([{ do: 'agent', name: 'Tester', status: 'working', task: 'Checking' }])
+  await helper('worker', [{ do: 'say', type: 'report', text: 'Done: the change is made' }])
+  await call([{ do: 'orch', status: 'needs_user' }])
+  await clock.advance(1000)
+  await call([{ do: 'accept', name: 'Worker' }])
+  expect(orch().status).toBe('needs_user')
+  await clock.advance(1000)
+  await call([{ do: 'sendback', name: 'Worker', task: 'One more thing' }])
+  expect(orch().status).toBe('needs_user')
+  await clock.advance(6000)
+  await helper('tester', [{ do: 'say', text: 'Halfway through the checks' }])
+  expect(orch().status).toBe('needs_user')
+  await clock.advance(6000)
+  await helper('tester', [{ do: 'say', type: 'report', text: 'PASS' }])
+  expect(orch()).toMatchObject({ status: 'needs_user', reviewing: ['Tester'] })
+})
+
+test('NEEDS YOU and a paused task: the circle says NEEDS YOU and the task chip PAUSED', async ($, on) => {
+  const { clock, call, helper, stop, orch } = await orchestrating($, on)
+  await helper('worker', [{ do: 'say', type: 'report', text: 'Done: the change is made' }])
+  await call([{ do: 'orch', status: 'needs_user' }])
+  await clock.advance(1000)
+  await call([{ do: 'task.pause', reason: 'Waiting for the owner' }])
+  // As it happened: an accept after the pause, then the turn ends. What it set still stands.
+  await clock.advance(1000)
+  await call([{ do: 'accept', name: 'Worker' }])
+  await stop()
+  expect(orch().status).toBe('needs_user')
+  await clock.advance(1000)
+  const { svg, alts } = await drawn($)
+  expect(svg).toContain('>NEEDS YOU<')
+  expect(alts).toContain('Mission Control, paused')
+  expect(svg).toContain('PAUSED')
+})
+
+test('NEEDS YOU stays through turns the person did not start: a note, a notice, a re-prompt', async ($, on) => {
+  const { clock, call, stop, note, orch } = await orchestrating($, on)
+  await call([{ do: 'orch', status: 'needs_user' }])
+  await stop()
+  await clock.advance(1000)
+  // A helper session's note, a background task's notice: each opens a turn, which then ends.
+  await note('Tester', 'local_ts9')
+  expect(orch().status).toBe('needs_user')
+  await stop()
+  await $.prompt.submit({ text: 'Background task finished.', wait: false, origin: { kind: 'task-notification' } } as never)
+  await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  expect(orch().status).toBe('needs_user')
+  // The turn-end guard's re-prompt continues the same turn.
+  await $.classic.Stop({ stop_hook_active: true } as never)
+  expect(orch().status).toBe('needs_user')
+  // A slash command the person types is not their answer either.
+  await $.prompt.submit({ text: '/mission', command: { name: 'mission', args: '' }, wait: false, origin: { kind: 'composer' } } as never)
+  expect(orch().status).toBe('needs_user')
+})
+
+test("the person's prompt answers NEEDS YOU: WORKING while the turn runs", async ($, on) => {
+  const { clock, call, stop, orch } = await orchestrating($, on)
+  await call([{ do: 'orch', status: 'needs_user' }])
+  await stop()
+  await clock.advance(1000)
+  await $.prompt.submit({ text: 'Yes, go ahead', wait: false, origin: { kind: 'composer' } } as never)
+  expect(orch().status).toBe('working')
+  await clock.advance(1000)
+  expect((await drawn($)).svg).toContain('>WORKING<')
+  await stop()
+  expect(orch().status).toBe('waiting')
+})
+
+test('NEEDS YOU gives way to task.done, task.fail, task.start and task.resume', async ($, on) => {
+  const { clock, call, orch } = await orchestrating($, on)
+  await call([{ do: 'orch', status: 'needs_user' }, { do: 'task.done' }])
+  expect(orch().status).toBe('done')
+  await clock.advance(1000)
+  await call([{ do: 'task.start', title: 'Next' }, { do: 'orch', status: 'needs_user' }, { do: 'task.fail' }])
+  expect(orch().status).toBe('working')
+  await clock.advance(1000)
+  await call([{ do: 'task.start', title: 'Third' }, { do: 'orch', status: 'needs_user' }, { do: 'task.pause' }])
+  expect(orch().status).toBe('needs_user')
+  await call([{ do: 'task.resume' }])
+  expect(orch().status).toBe('working')
 })

@@ -20,7 +20,7 @@
 
 import type { EngineInterface, On } from 'claude-code'
 
-import { afterWrite, pathsOf, readIfThere, report, writeTurn } from './io'
+import { afterWrite, answered, pathsOf, readIfThere, report, writeTurn } from './io'
 import { parseState, type McState } from './model'
 import { projectFolderOf, turnOf, type Turn } from './transcript'
 import { clip, type Report } from './writer'
@@ -194,9 +194,16 @@ const waitingWith = (state: McState, role: string): string[] => {
   return [...names.filter(name => name.toLowerCase() !== role.toLowerCase()), role]
 }
 
+/** Whether the orchestrator has asked the person something (NEEDS YOU), which only the person's answer ends. */
+const asksPerson = (state: McState): boolean => state.orchestrator.status === 'needs_user'
+
 /** Whether the agent has already handed in (its own report line moved it): the note then changes nothing. */
 const isInReview = (state: McState, role: string): boolean =>
   state.agents.some(each => each.name.toLowerCase() === role.toLowerCase() && each.status === 'in_review')
+
+/** Accepted for the current task, with no brief, send back or report line of its own since, and still done. */
+const keptDone = (state: McState, log: { kept: Set<string> }, role: string): boolean =>
+  log.kept.has(role.toLowerCase()) && state.agents.some(each => each.name.toLowerCase() === role.toLowerCase() && each.status === 'done')
 
 /** Whether the agent's status changed after `since` (the orchestrator's own write wins). */
 const changedSince = (state: McState, role: string, since: number): boolean => {
@@ -212,7 +219,8 @@ export function dispatch($: EngineInterface, role: string, text: string, at: num
       : [
           { do: 'event', type: 'dispatch', from: 'orchestrator', to: idOf(role), text, auto: true },
           { do: 'agent', name: role, status: 'working', task: text },
-          { do: 'orch', status: 'waiting', waitingOn: waitingWith(state, role) },
+          // The orchestrator's own NEEDS YOU waits for the person: an automatic write never replaces it.
+          ...(asksPerson(state) ? [] : [{ do: 'orch', status: 'waiting', waitingOn: waitingWith(state, role) } as Report]),
         ],
   )
 }
@@ -232,13 +240,13 @@ export async function handIn($: EngineInterface, role: string, at: number): Prom
   const log = await logged($)
   const { line, task } = handedIn(log.own, role)
   return report($, (state: McState): Report[] =>
-    // Already accepted for a task that is over: logged, and its card stays as it is.
-    changedSince(state, role, at) || isInReview(state, role) || settledFor(log, role)
+    // Already accepted for this job (the task running, paused or over) and still done: logged, and its card stays as it is.
+    changedSince(state, role, at) || isInReview(state, role) || settledFor(log, role) || keptDone(state, log, role)
       ? [{ do: 'event', type: 'report', from: idOf(role), to: 'orchestrator', text: line, auto: true }]
       : [
           { do: 'event', type: 'report', from: idOf(role), to: 'orchestrator', text: line, auto: true },
           { do: 'agent', name: role, status: 'in_review', task },
-          { do: 'orch', status: 'reviewing', reviewing: [role] },
+          ...(asksPerson(state) ? [] : [{ do: 'orch', status: 'reviewing', reviewing: [role] } as Report]),
         ],
   )
 }
@@ -355,6 +363,25 @@ async function ownRole($: EngineInterface): Promise<string | null> {
   return role ?? null
 }
 
+/**
+ * Whether this session is a helper by everything known now: a role from its brief or `/mission role`,
+ * else the stored roles. A session that has briefed someone never is. A helper whose brief has not
+ * come yet, and that no record names, is not known as one.
+ */
+export async function isHelper($: EngineInterface): Promise<boolean> {
+  if (helperRole) return true
+  if (briefed) return false
+  const id = await $.session.id().catch(() => '')
+  return id !== '' && Boolean((await readRoles($))[id])
+}
+
+/** Whether this session's id is already stored as an orchestrator's (by an earlier load, a report or a brief). */
+export async function knownOrchestrator($: EngineInterface): Promise<boolean> {
+  const id = await $.session.id().catch(() => '')
+  const known = await $.store.get(STORE_ORCH).catch(() => undefined)
+  return id !== '' && Array.isArray(known) && known.includes(id)
+}
+
 /** Helper sessions' roles by transcript id, beside state.json: written by the orchestrator's watcher and by a helper from its brief. */
 const ROLES_FILE = '.roles.json'
 async function readRoles($: EngineInterface): Promise<Record<string, string>> {
@@ -429,6 +456,9 @@ async function ownAnswered($: EngineInterface, role: string): Promise<void> {
  * list, a helper's brief): only these are read for names, roles and hand-ins. Text the person
  * types or pastes (`composer`, `person`) is never acted on, whatever it looks like.
  */
+/** A prompt the person typed: at the prompt box (in the desktop app as well) or through Remote Control. */
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
+
 const APP_ORIGINS = new Set([
   'submit:sdk',
   'submit:peer',
@@ -514,6 +544,8 @@ export function registerAuto(on: On): void {
   }).catch((_$, e, next) => next(e))
   on('prompt.submit', async ($, e, next) => {
     void incoming($, `submit:${e.origin.kind}`, e.text).catch(() => undefined)
+    // Only the person's own prompt answers the orchestrator's NEEDS YOU: never a note, a notice or a slash command.
+    if (PERSON_ORIGINS.has(e.origin.kind) && !e.command && orchestrating && !helperRole) await answered($).catch(() => undefined)
     await openTurn($, true).catch(() => undefined)
     return next(e)
   }).catch((_$, e, next) => next(e))
@@ -925,9 +957,11 @@ type Brief = { text: string; other: boolean; at: number }
 /**
  * From the log: each agent's own report line for its current job, the last brief it was given, and,
  * when the current task is finished or failed (`closed`), the agents already accepted for it.
+ * `kept`: the agents accepted for the current task, whatever its status, with no brief, send back
+ * or report line of their own after that accept: a helper's result arriving late moves none of them.
  */
-type Logged = { own: Map<string, string>; reportedAt: Map<string, number>; briefs: Map<string, Brief>; closed: boolean; accepted: Set<string> }
-const EMPTY_LOG: Logged = { own: new Map(), reportedAt: new Map(), briefs: new Map(), closed: false, accepted: new Set() }
+type Logged = { own: Map<string, string>; reportedAt: Map<string, number>; briefs: Map<string, Brief>; closed: boolean; accepted: Set<string>; kept: Set<string> }
+const EMPTY_LOG: Logged = { own: new Map(), reportedAt: new Map(), briefs: new Map(), closed: false, accepted: new Set(), kept: new Set() }
 /** An agent accepted for a task that is already over: its late turn end or report changes nothing. */
 const settledFor = (log: Logged, role: string): boolean => log.closed && log.accepted.has(role.toLowerCase())
 /**
@@ -1042,6 +1076,7 @@ async function logged($: EngineInterface): Promise<Logged> {
   const current = task?.id
   const closed = task?.status === 'done' || task?.status === 'failed'
   const accepted = new Set<string>()
+  const kept = new Set<string>()
   for (const raw of (log ?? '').split('\n')) {
     let event: { type?: unknown; from?: unknown; to?: unknown; text?: unknown; auto?: unknown; side?: unknown; taskId?: unknown; time?: unknown }
     try {
@@ -1050,23 +1085,29 @@ async function logged($: EngineInterface): Promise<Logged> {
       continue
     }
     if (event.type === 'dispatch') {
+      kept.delete(String(event.to ?? '').toLowerCase())
       lines.delete(String(event.to ?? '').toLowerCase())
       reportedAt.delete(String(event.to ?? '').toLowerCase())
       // A brief marked side, or written under a task other than the current one, is other work.
       const other = event.side === true || (typeof event.taskId === 'string' && event.taskId !== current)
       if (typeof event.text === 'string') briefs.set(String(event.to ?? '').toLowerCase(), { text: event.text, other, at: Number(event.time) || 0 })
     } else if (event.type === 'report' && event.auto !== true && typeof event.text === 'string') {
+      kept.delete(String(event.from ?? '').toLowerCase())
       lines.set(String(event.from ?? '').toLowerCase(), event.text)
       reportedAt.set(String(event.from ?? '').toLowerCase(), Number(event.time) || 0)
     }
-    else if (event.type === 'agent_done' && closed && event.taskId === current && event.side !== true) {
+    else if (event.type === 'agent_done' && event.taskId === current && event.side !== true) {
       // Accepted for this task: from the agent itself, or several in one "Accepted: A, B" line.
       const from = String(event.from ?? '').toLowerCase()
       const names = from === 'orchestrator' ? (/^Accepted: (.+)$/.exec(String(event.text ?? ''))?.[1]?.split(',') ?? []) : [from]
-      for (const name of names) if (name.trim()) accepted.add(name.trim().toLowerCase())
+      for (const name of names) {
+        if (!name.trim()) continue
+        kept.add(name.trim().toLowerCase())
+        if (closed) accepted.add(name.trim().toLowerCase())
+      }
     }
   }
-  return { own: lines, reportedAt, briefs, closed, accepted }
+  return { own: lines, reportedAt, briefs, closed, accepted, kept }
 }
 
 /** Whether a helper's session is running now: its turn running, and its transcript changed in QUIET_MS. */

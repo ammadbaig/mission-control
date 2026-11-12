@@ -255,7 +255,8 @@ def orchestrator_of(state):
     orchestratorOf).
 
     Whom it waits on is the agents working, whom it reviews the agents in review. Its status, in
-    this order: needs_user while what it set stands (no agent's state changed since); reviewing while
+    this order: needs_user until the person answers, another status is set or a task starts, ends or
+    resumes (no agent's change drops it); reviewing while
     any agent is in review; while its own turn runs (`turn`, written by the plugin only), done if it
     finished the task in this turn, planning or dispatching if it set one in this turn and it stands,
     else working; outside a turn, what it set while that stands; waiting while any agent works; done
@@ -270,7 +271,7 @@ def orchestrator_of(state):
     status = orch.get("status", "idle")
     stands = status in ORCH_OWN and since and since["since"] + SAME_CALL_MS >= last_change
     this_turn = turn is not None and since and since["since"] >= turn
-    if status == "needs_user" and stands:
+    if status == "needs_user":
         pass
     elif reviewing:
         status = "reviewing"
@@ -502,6 +503,9 @@ def cmd_task(args):
         state["task"]["status"] = "running"
         state["task"].pop("pausedAt", None)
         state["task"].pop("pauseReason", None)
+        # Going on answers the orchestrator's own question.
+        if (state.get("orchestrator") or {}).get("status") == "needs_user":
+            rest_orchestrator(state, "idle")
         append_event("task_resumed", "Orchestrator", "", "Resumed")
     else:
         if not state["task"]:

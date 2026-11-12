@@ -237,6 +237,47 @@ export function writeTurn($: EngineInterface, open: boolean, log = ''): Promise<
 }
 
 /**
+ * The person has answered the orchestrator (their own prompt): its NEEDS YOU, if it stands, gives
+ * way to IDLE, and the turn that prompt opens shows WORKING. Anything else is left as it is.
+ */
+export function answered($: EngineInterface): Promise<void> {
+  return serially(async () => {
+    const { state: STATE_FILE } = await pathsOf($)
+    if (!STATE_FILE) return
+    const raw = await readIfThere($, STATE_FILE)
+    const stored = raw ? parseState(raw) : null
+    if (stored?.orchestrator.status !== 'needs_user') return
+    const now = await $.clock.now()
+    const state = settled({ ...stored, orchestrator: { ...stored.orchestrator, status: 'idle', since: now }, lastUpdated: now })
+    await $.fs.write(STATE_FILE, stateText(state))
+    onWritten?.(state)
+    alsoWritten?.()
+  })
+}
+
+/**
+ * A new conversation opens the pane on the empty state: when the stored task is done or failed, the
+ * task, plan and agents are cleared and the orchestrator is idle; the queue is kept and events.jsonl
+ * is left as it is. A running or paused task, no state, or a file that is not a state is left alone.
+ * True when it cleared.
+ */
+export function clearFinished($: EngineInterface): Promise<boolean> {
+  return serially(async () => {
+    const { state: STATE_FILE } = await pathsOf($)
+    if (!STATE_FILE) return false
+    const raw = await readIfThere($, STATE_FILE)
+    const stored = raw ? parseState(raw) : null
+    const status = stored?.task?.status
+    if (!stored || (status !== 'done' && status !== 'failed')) return false
+    const state = settled({ ...emptyState(await $.clock.now()), queue: stored.queue })
+    await $.fs.write(STATE_FILE, stateText(state))
+    onWritten?.(state)
+    alsoWritten?.()
+    return true
+  })
+}
+
+/**
  * A plain line that opens with one of these, from a working agent, is its report: Done, Finished,
  * Handing in, PASS or FAIL; Final and Report only with a colon or dash (-, –, —) right after the word,
  * since "Report line fixed", "Final checks running" or a bare "Final" are progress.

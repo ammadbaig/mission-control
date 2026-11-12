@@ -9,8 +9,8 @@ import { clockKeyOf, EMPTY_DATA, KEEP_EVENTS, isOffline, PART_TYPES, parseState,
 import { GHOST_MS, settle, shown as asShown, steady, type Shown } from './swap'
 import { activityLines, overviewLines, type Line, type Tone } from './term'
 import { TOKENS } from './tokens'
-import { autoCommand, loadAuto, markOrchestrating, notePanel, openTurn, startWatch, TAIL_BYTES, tailOf, watchCall } from './auto'
-import { pathsOf, report, say, serially, whenWritten } from './io'
+import { autoCommand, isHelper, knownOrchestrator, loadAuto, markOrchestrating, notePanel, openTurn, startWatch, TAIL_BYTES, tailOf, watchCall } from './auto'
+import { clearFinished, pathsOf, report, say, serially, whenWritten } from './io'
 import { endedTurn, MAX_UPDATES, stateText, type Report } from './writer'
 import { turnOf } from './transcript'
 
@@ -240,7 +240,8 @@ export async function startMission($: EngineInterface): Promise<void> {
     recent = recent.filter(item => now - item.at < SHOTS_KEPT_MS)
     const fresh = recent.map(item => item.event)
     const freshAt = recent.map(item => item.at)
-    const real: MissionData = { loaded: true, state: shown, events, eventCount, fresh, freshAt, readAt: now, offline, aliveAt, ...(results ? { results } : {}) }
+    // With no task the pane shows no events: none of a finished task's lines once it is cleared.
+    const real: MissionData = { loaded: true, state: shown, events: shown?.task ? events : [], eventCount: shown?.task ? eventCount : 0, fresh, freshAt, readAt: now, offline, aliveAt, ...(results ? { results } : {}) }
     // New shots (only where they play: a live pane) hold their agents' looks until they land.
     if (justRead.length > 0 && modeOf(real, now) === 'live') {
       const landed = shotPlan(real, shown?.task?.id)
@@ -503,6 +504,13 @@ export const registerMission: Register = on => {
     }
     if (asked === 'light' || asked === 'dark' || asked === 'auto') {
       await update($, themeSetting, () => asked as MissionTheme)
+    }
+    // A session that is not a helper opening the pane is the orchestrator. A conversation new to the
+    // plugin first clears a finished task, so it starts on the empty state; the check comes before the
+    // mark, which would make it known. No turn is opened: a slash command is not a turn.
+    if (!(await isHelper($).catch(() => true))) {
+      if (!asked && !(await knownOrchestrator($).catch(() => true))) await clearFinished($).catch(() => false)
+      await markOrchestrating($).catch(() => undefined)
     }
     await $.ui.open({ id: PANE, title: TITLE })
     // From the top: the terminal follows a tall pane's end otherwise.
